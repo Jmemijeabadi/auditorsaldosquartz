@@ -9,19 +9,26 @@ import plotly.graph_objects as go
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "3.0"
+APP_VERSION = "4.0 ARPON · HOTEL QUARTZ"
 UMBRAL_TOLERANCIA = 1.0
 UMBRAL_FOLIO = 0.01
 
 # Prefijos documentales que sí tratamos como folios.
 # Se conservan; NO se eliminan durante la normalización.
 PREFIJOS_FOLIO = (
-    "NCTA", "NCNCT", "SNCTA", "ANCT", "PNCT", "NTCA", "NTA", "NC"
+    # Prefijos documentales observados en auxiliares ARPON de Hotel Quartz.
+    "H", "B", "R", "X", "E", "S",
 )
+
+REFERENCIAS_VACIAS = {
+    "", "N/A", "NA", "N.A.", "SIN REF", "SIN REFERENCIA", "S/R",
+    "NO APLICA", "NO APLICA.", "NINGUNA", "-", "—", "–", "0",
+}
 
 MESES_ES = {
     "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
-    "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12,
+    "jul": 7, "ago": 8, "aug": 8, "sep": 9, "sept": 9, "oct": 10,
+    "nov": 11, "dic": 12, "dec": 12, "jan": 1, "apr": 4,
 }
 
 # ==============================================================================
@@ -55,13 +62,30 @@ def parse_spanish_date(valor):
     if pd.isna(valor):
         return pd.NaT
 
-    # Si Excel ya entregó Timestamp/datetime.
     if isinstance(valor, (pd.Timestamp, np.datetime64)):
         return pd.Timestamp(valor)
 
-    s = str(valor).strip()
+    # Excel puede entregar la fecha como serial numérico, sobre todo en CSV
+    # exportados o libros con formatos poco consistentes.
+    if isinstance(valor, (int, float, np.integer, np.floating)):
+        n = float(valor)
+        if 20000 <= n <= 80000:
+            try:
+                return pd.Timestamp("1899-12-30") + pd.to_timedelta(n, unit="D")
+            except Exception:
+                return pd.NaT
 
-    # dd/Mmm/aaaa
+    s = str(valor).strip()
+    if not s:
+        return pd.NaT
+
+    # Serial de Excel guardado como texto.
+    if re.fullmatch(r"\d{5}(?:\.\d+)?", s):
+        n = float(s)
+        if 20000 <= n <= 80000:
+            return pd.Timestamp("1899-12-30") + pd.to_timedelta(n, unit="D")
+
+    # dd/Mmm/aaaa, aceptando abreviaturas ES/EN.
     m = re.match(
         r"^(\d{1,2})[/\-]([A-Za-zÁÉÍÓÚáéíóúÑñ]{3,4})[/\-](\d{4})$",
         s,
@@ -77,13 +101,20 @@ def parse_spanish_date(valor):
             except ValueError:
                 return pd.NaT
 
-    # Fallback para fechas numéricas o formatos de Excel ya convertidos a texto.
+    # ISO yyyy-mm-dd / yyyy-mm-dd hh:mm:ss.
+    if re.match(r"^\d{4}-\d{1,2}-\d{1,2}", s):
+        return pd.to_datetime(s, errors="coerce")
+
+    # Evita interpretar números aislados (por ejemplo "2026") como fechas.
+    if not re.search(r"[/\-]", s) and not re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", s):
+        return pd.NaT
+
     return pd.to_datetime(s, dayfirst=True, errors="coerce")
 
 
 def parse_amount(valor):
     """
-    Convierte montos de CONTPAQ sin convertir silenciosamente texto inválido en cero.
+    Convierte montos contables sin convertir silenciosamente texto inválido en cero.
     Soporta:
       1,234.56
       $1,234.56
@@ -161,6 +192,9 @@ def normalizar_referencia_base(ref):
         s = str(ref).strip()
 
     s = texto_norm(s)
+    if s in REFERENCIAS_VACIAS:
+        return None, "VACIA", None
+
     s = re.sub(
         r"^(?:FACTURA|FAC|FOLIO|REF|REFERENCIA)\s*[:.\-]?\s*",
         "",
@@ -305,169 +339,268 @@ def to_excel_workbook(tablas):
     return output.getvalue()
 
 
-def buscar_saldo_inicial_en_fila(row):
-    vals = list(row)
-    for i, valor in enumerate(vals):
-        if "saldo inicial" in texto_norm(valor).lower():
-            for j in range(i + 1, len(vals)):
-                n = parse_amount(vals[j])
-                if not pd.isna(n):
-                    return float(n)
-    return np.nan
+def construir_empresa_uid(sistema_origen, empresa):
+    """Identidad estable para impedir cruces entre sistemas o empresas distintas."""
+    empresa_norm = texto_norm(empresa)
+    if not empresa_norm:
+        empresa_norm = "SIN_EMPRESA_IDENTIFICADA"
+    return f"{sistema_origen}::{empresa_norm}"
 
 
-def buscar_columna_texto(row, objetivo_exacto):
-    objetivo = texto_norm(objetivo_exacto)
-    for i, valor in enumerate(row):
-        if texto_norm(valor) == objetivo:
-            return i
-    return None
+def agregar_identidad_origen(df, sistema_origen, empresa, file_name):
+    """Agrega identidad de sistema, empresa y cuenta a movimientos/resúmenes."""
+    x = df.copy()
+    empresa_txt = "" if empresa is None else str(empresa).strip()
+    empresa_uid = construir_empresa_uid(sistema_origen, empresa_txt)
+    x["sistema_origen"] = sistema_origen
+    x["empresa"] = empresa_txt
+    x["empresa_uid"] = empresa_uid
+    x["cuenta_logica_uid"] = (
+        empresa_uid + "::" + x["meta_codigo"].astype(str)
+    )
+    # cuenta_uid distingue la ocurrencia del mismo código dentro de cada archivo.
+    x["cuenta_uid"] = (
+        empresa_uid + "::" + str(file_name) + "::" + x["meta_codigo"].astype(str)
+    )
+    return x
 
 
 # ==============================================================================
-# 2. MOTOR DE LECTURA Y VALIDACIÓN
+# 2. MOTOR ARPON DE LECTURA Y VALIDACIÓN
 # ==============================================================================
 
-def procesar_archivo_core(file_bytes, file_name):
-    raw = cargar_archivo_robusto(file_bytes, file_name)
+def validar_formato_arpon(raw, file_name):
+    """Valida que el archivo tenga la firma del Auxiliar de Cuentas de ARPON."""
+    if raw.empty:
+        raise ValueError(f"{file_name}: el archivo está vacío.")
 
-    if raw.shape[1] < 8:
+    if raw.shape[1] < 7:
         raise ValueError(
-            f"{file_name}: se esperaban al menos 8 columnas del auxiliar CONTPAQ "
-            f"y se encontraron {raw.shape[1]}."
+            f"{file_name}: este auditor es exclusivo para ARPON y espera al menos "
+            "7 columnas: Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo."
         )
 
-    raw_str = raw.fillna("").astype(str)
+    for _, row in raw.iterrows():
+        vals = [texto_norm(row.iloc[i]) for i in range(7)]
+        if (
+            vals[0] == "POLIZA"
+            and vals[1] == "FECHA"
+            and vals[2].startswith("DOCTO")
+            and vals[3] == "CONCEPTO"
+            and vals[4] == "CARGO"
+            and vals[5] == "ABONO"
+            and vals[6] == "SALDO"
+        ):
+            return True
 
-    # Más flexible que NNN-NNN-NNN-NNN, pero sigue exigiendo estructura de cuenta.
-    patron_cuenta = r"^\d+(?:-\d+){2,}$"
-    mask_candidato_cuenta = raw_str[0].str.strip().str.match(
-        patron_cuenta, na=False
+    primeras = raw.head(10).fillna("").astype(str).to_string(index=False, header=False)
+    raise ValueError(
+        f"{file_name}: el archivo no corresponde al Auxiliar de Cuentas de ARPON. "
+        "Este auditor solo acepta exportaciones ARPON. Se espera la estructura "
+        "Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo. "
+        f"Primeras filas detectadas:\n{primeras[:800]}"
     )
 
-    mask_saldo = raw_str.apply(
-        lambda r: r.str.contains("Saldo inicial", case=False, na=False).any(),
-        axis=1,
-    )
-    is_header = mask_candidato_cuenta & mask_saldo
+def extraer_empresa_periodo_arpon(raw):
+    """Extrae empresa y periodo del Auxiliar de Cuentas exportado por ARPON."""
+    empresa = None
+    periodo_inicio = pd.NaT
+    periodo_fin = pd.NaT
 
-    candidatos_no_header = raw.index[
-        mask_candidato_cuenta & ~is_header
-    ].tolist()
+    idx_aux = None
+    texto_aux = None
+    for idx in raw.index:
+        for col in range(min(raw.shape[1], 4)):
+            t = texto_norm(raw.iloc[idx, col])
+            if "AUXILIAR DE CUENTAS" in t:
+                idx_aux = idx
+                texto_aux = str(raw.iloc[idx, col])
+                break
+        if idx_aux is not None:
+            break
 
-    # Movimientos: primero reconocemos la forma; después validamos que la fecha
-    # realmente pueda convertirse.
-    patron_fecha = (
-        r"^\d{1,2}[/\-][A-Za-zÁÉÍÓÚáéíóúÑñ]{3,4}[/\-]\d{4}$"
-    )
-    is_mov = raw_str[0].str.strip().str.match(patron_fecha, na=False)
+    if idx_aux is not None:
+        for j in range(idx_aux - 1, -1, -1):
+            candidato = raw.iloc[j, 0] if raw.shape[1] else None
+            if es_vacio(candidato):
+                continue
+            c = str(candidato).strip()
+            cn = texto_norm(c)
+            if cn.startswith("MON ") or cn.startswith("TUE ") or cn.startswith("WED "):
+                continue
+            if cn.startswith("THU ") or cn.startswith("FRI ") or cn.startswith("SAT "):
+                continue
+            if cn.startswith("SUN "):
+                continue
+            empresa = c
+            break
 
-    # Totales por cuenta. En este formato aparecen en columna E (índice 4).
-    mask_total = raw_str[4].str.strip().eq("Total:")
-
-    # Total general espaciado: "T o t a l:".
-    col4_compacto = (
-        raw_str[4]
-        .str.replace(r"\s+", "", regex=True)
-        .str.strip()
-        .str.lower()
-    )
-    es_total_general = (
-        col4_compacto.eq("total:")
-        & ~raw_str[4].str.strip().eq("Total:")
-    )
-
-    n_headers = int(is_header.sum())
-    n_totales = int(mask_total.sum())
-    n_movs = int(is_mov.sum())
-
-    problemas_estructura = []
-    if n_headers == 0:
-        problemas_estructura.append(
-            "No se detectó ningún encabezado de cuenta con saldo inicial."
+    if texto_aux:
+        m = re.search(
+            r"DEL\s+(.+?)\s+AL\s+(.+?)$",
+            texto_norm(texto_aux),
+            flags=re.I,
         )
-    if candidatos_no_header:
-        problemas_estructura.append(
-            f"Hay {len(candidatos_no_header)} fila(s) que parecen código de cuenta "
-            "pero no contienen 'Saldo inicial'."
-        )
-    if n_headers != n_totales:
-        problemas_estructura.append(
-            f"Encabezados de cuenta ({n_headers}) != filas 'Total:' ({n_totales})."
-        )
-    if n_movs == 0:
-        problemas_estructura.append("No se detectaron movimientos con fecha dd/Mmm/aaaa.")
+        if m:
+            periodo_inicio = parse_spanish_date(m.group(1).title())
+            periodo_fin = parse_spanish_date(m.group(2).title())
 
-    if problemas_estructura:
+    return empresa, periodo_inicio, periodo_fin
+
+
+def validar_secuencia_saldo(movs, resumen):
+    """
+    Valida el saldo acumulado movimiento por movimiento usando las dos
+    naturalezas posibles. Devuelve diagnóstico por cuenta.
+    """
+    resultados = []
+    mapa_si = resumen.set_index("cuenta_uid")["saldo_inicial"]
+
+    for cuenta_uid, mm in movs.groupby("cuenta_uid"):
+        mm = mm.sort_values("fila_origen").copy()
+        saldo_ini = float(mapa_si.loc[cuenta_uid])
+
+        prev = mm["saldo_acumulado"].shift(1)
+        prev.iloc[0] = saldo_ini
+
+        esperado_deud = prev + mm["cargos"] - mm["abonos"]
+        esperado_acre = prev - mm["cargos"] + mm["abonos"]
+        err_deud = (mm["saldo_acumulado"] - esperado_deud).abs()
+        err_acre = (mm["saldo_acumulado"] - esperado_acre).abs()
+
+        max_deud = float(err_deud.max()) if len(err_deud) else 0.0
+        max_acre = float(err_acre.max()) if len(err_acre) else 0.0
+
+        if max_deud <= UMBRAL_TOLERANCIA and max_acre > UMBRAL_TOLERANCIA:
+            nat = "DEUDORA"
+            err_elegido = err_deud
+        elif max_acre <= UMBRAL_TOLERANCIA and max_deud > UMBRAL_TOLERANCIA:
+            nat = "ACREEDORA"
+            err_elegido = err_acre
+        elif max_deud <= UMBRAL_TOLERANCIA and max_acre <= UMBRAL_TOLERANCIA:
+            nat = "INDETERMINADA"
+            err_elegido = pd.concat([err_deud, err_acre], axis=1).min(axis=1)
+        elif max_deud < max_acre:
+            nat = "DEUDORA"
+            err_elegido = err_deud
+        else:
+            nat = "ACREEDORA"
+            err_elegido = err_acre
+
+        resultados.append(
+            {
+                "cuenta_uid": cuenta_uid,
+                "naturaleza_secuencia": nat,
+                "n_errores_saldo_secuencia": int(
+                    (err_elegido > UMBRAL_TOLERANCIA).sum()
+                ),
+                "max_error_saldo_secuencia": float(err_elegido.max()),
+                "max_error_deudora_secuencia": max_deud,
+                "max_error_acreedora_secuencia": max_acre,
+                "ultimo_saldo_movimiento": float(mm.iloc[-1]["saldo_acumulado"]),
+            }
+        )
+
+    return pd.DataFrame(resultados)
+
+
+def procesar_formato_arpon(raw, file_name):
+    """
+    Procesa el Auxiliar de Cuentas de ARPON usado por Hotel Quartz:
+      Cuenta: código - nombre                                  saldo inicial
+      Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo
+      ...
+             Totales                         cargos | abonos | saldo final
+             Neto Periodo                           | neto
+    """
+    if raw.shape[1] < 7:
         raise ValueError(
-            f"{file_name}: la estructura no puede certificarse. "
-            + " ".join(problemas_estructura)
+            f"{file_name}: el auxiliar ARPON requiere al menos 7 columnas."
         )
 
-    df = raw.copy()
-    df["meta_codigo"] = np.where(is_header, raw[0], np.nan)
-    df["meta_nombre"] = np.where(is_header, raw[1], np.nan)
+    empresa, periodo_inicio, periodo_fin = extraer_empresa_periodo_arpon(raw)
 
-    saldo_ini_map = {}
-    for idx in raw.index[is_header]:
-        saldo_ini = buscar_saldo_inicial_en_fila(raw.loc[idx])
+    # Encabezados de cuenta.
+    patron_header = re.compile(
+        r"^CUENTA:\s*(\d+(?:-\d+){2,})\s*-\s*(.+)$",
+        flags=re.I,
+    )
+    headers = []
+    for idx in raw.index:
+        t = texto_norm(raw.iloc[idx, 0])
+        m = patron_header.match(t)
+        if not m:
+            continue
+        saldo_ini = parse_amount(raw.iloc[idx, 6])
         if pd.isna(saldo_ini):
             raise ValueError(
                 f"{file_name}: no pude leer el saldo inicial de la cuenta "
-                f"{raw.loc[idx, 0]} (fila Excel {idx + 1})."
+                f"{m.group(1)} en la fila Excel {idx + 1}."
             )
-        saldo_ini_map[idx] = saldo_ini
+        headers.append(
+            {
+                "idx": idx,
+                "codigo": m.group(1),
+                "nombre": m.group(2).strip(),
+                "saldo_inicial": float(saldo_ini),
+            }
+        )
 
-    df["meta_saldo_inicial"] = np.nan
-    for idx, saldo in saldo_ini_map.items():
-        df.loc[idx, "meta_saldo_inicial"] = saldo
+    if not headers:
+        raise ValueError(
+            f"{file_name}: no se detectó ninguna fila 'Cuenta: código - nombre'."
+        )
 
-    # El ffill solo se hace DESPUÉS de validar que todos los candidatos de cuenta
-    # fueron reconocidos como headers.
+    df = raw.copy()
+    df["meta_codigo"] = pd.Series(index=df.index, dtype="object")
+    df["meta_nombre"] = pd.Series(index=df.index, dtype="object")
+    df["meta_saldo_inicial"] = pd.Series(index=df.index, dtype="float64")
+
+    for h in headers:
+        df.loc[h["idx"], "meta_codigo"] = h["codigo"]
+        df.loc[h["idx"], "meta_nombre"] = h["nombre"]
+        df.loc[h["idx"], "meta_saldo_inicial"] = h["saldo_inicial"]
+
     df["meta_codigo"] = df["meta_codigo"].ffill()
     df["meta_nombre"] = df["meta_nombre"].ffill()
     df["meta_saldo_inicial"] = df["meta_saldo_inicial"].ffill()
 
-    # Verifica movimientos huérfanos.
-    if df.loc[is_mov, "meta_codigo"].isna().any():
-        filas = (df.index[is_mov & df["meta_codigo"].isna()] + 1).tolist()
-        raise ValueError(
-            f"{file_name}: hay movimientos sin cuenta asociada en filas {filas[:10]}."
-        )
+    # Movimiento = fecha válida en columna B + póliza en A + cuenta ya activa.
+    fechas_candidato = raw[1].apply(parse_spanish_date)
+    etiquetas_b = raw[1].apply(texto_norm)
+    is_mov = (
+        fechas_candidato.notna()
+        & raw[0].apply(lambda x: not es_vacio(x))
+        & df["meta_codigo"].notna()
+        & ~etiquetas_b.isin({"TOTALES", "NETO PERIODO"})
+    )
 
-    # --------------------------------------------------------------------------
-    # Movimientos
-    # --------------------------------------------------------------------------
+    if not is_mov.any():
+        raise ValueError(f"{file_name}: no se detectaron movimientos válidos.")
+
     movs = df[is_mov].copy()
     movs = movs.rename(
         columns={
-            0: "fecha_raw",
-            1: "tipo_poliza",
-            2: "poliza",
+            0: "poliza",
+            1: "fecha_raw",
+            2: "referencia",
             3: "concepto",
-            4: "referencia",
-            5: "cargos",
-            6: "abonos",
-            7: "saldo_acumulado",
+            4: "cargos",
+            5: "abonos",
+            6: "saldo_acumulado",
         }
     )
-
+    movs["tipo_poliza"] = (
+        movs["poliza"].astype(str).str.extract(r"^([A-Za-z]+)", expand=False)
+        .fillna("").str.upper()
+    )
     movs["fila_origen"] = movs.index + 1
     movs["archivo"] = file_name
-    movs["cuenta_uid"] = (
-        movs["archivo"].astype(str) + "::" + movs["meta_codigo"].astype(str)
-    )
-
-    # Fechas
+    movs["periodo_inicio"] = periodo_inicio
+    movs["periodo_fin"] = periodo_fin
+    movs = agregar_identidad_origen(movs, "ARPON", empresa or "", file_name)
     movs["fecha"] = movs["fecha_raw"].apply(parse_spanish_date)
-    if movs["fecha"].isna().any():
-        filas = movs.loc[movs["fecha"].isna(), "fila_origen"].tolist()
-        raise ValueError(
-            f"{file_name}: {len(filas)} fecha(s) de movimiento no pudieron "
-            f"interpretarse. Filas: {filas[:10]}."
-        )
 
-    # Montos: no convertir texto inválido a cero.
     for c in ["cargos", "abonos", "saldo_acumulado"]:
         original = movs[c].copy()
         convertido = columna_a_monto(original)
@@ -485,127 +618,201 @@ def procesar_archivo_core(file_bytes, file_name):
     movs["concepto_norm"] = movs["concepto"].apply(concepto_norm)
     movs = enriquecer_referencias(movs)
 
-    # --------------------------------------------------------------------------
-    # Totales por cuenta
-    # --------------------------------------------------------------------------
-    totales = df[mask_total].copy()
-    totales["archivo"] = file_name
-    totales["cuenta_uid"] = (
-        totales["archivo"].astype(str)
-        + "::"
-        + totales["meta_codigo"].astype(str)
-    )
+    # Resumen base por cuenta a partir del detalle.
+    resumen_rows = []
+    for h in headers:
+        uid = f"{construir_empresa_uid('ARPON', empresa or '')}::{file_name}::{h['codigo']}"
+        mm = movs[movs["cuenta_uid"] == uid].sort_values("fila_origen")
+        if mm.empty:
+            total_cargos = 0.0
+            total_abonos = 0.0
+            saldo_final = h["saldo_inicial"]
+        else:
+            total_cargos = float(mm["cargos"].sum())
+            total_abonos = float(mm["abonos"].sum())
+            saldo_final = float(mm.iloc[-1]["saldo_acumulado"])
 
-    for col_idx, nombre in [
-        (5, "total_cargos"),
-        (6, "total_abonos"),
-        (7, "saldo_final_aux"),
-    ]:
-        totales[nombre] = columna_a_monto(totales[col_idx])
-        if totales[nombre].isna().any():
-            filas = (totales.index[totales[nombre].isna()] + 1).tolist()
-            raise ValueError(
-                f"{file_name}: no pude leer '{nombre}' en Total:. "
-                f"Filas {filas[:10]}."
-            )
-
-    # Para este tipo de reporte exigimos un total por cuenta.
-    total_por_cuenta = totales.groupby("cuenta_uid").size()
-    multiples = total_por_cuenta[total_por_cuenta != 1]
-    if not multiples.empty:
-        raise ValueError(
-            f"{file_name}: se esperaba exactamente un 'Total:' por cuenta. "
-            f"Casos: {multiples.to_dict()}."
+        resumen_rows.append(
+            {
+                "archivo": file_name,
+                "sistema_origen": "ARPON",
+                "empresa": empresa or "",
+                "empresa_uid": construir_empresa_uid("ARPON", empresa or ""),
+                "cuenta_logica_uid": f"{construir_empresa_uid('ARPON', empresa or '')}::{h['codigo']}",
+                "periodo_inicio": periodo_inicio,
+                "periodo_fin": periodo_fin,
+                "cuenta_uid": uid,
+                "meta_codigo": h["codigo"],
+                "meta_nombre": h["nombre"],
+                "saldo_inicial": h["saldo_inicial"],
+                "total_cargos": total_cargos,
+                "total_abonos": total_abonos,
+                "saldo_final_aux": saldo_final,
+            }
         )
 
-    resumen = totales[
-        [
-            "archivo", "cuenta_uid", "meta_codigo", "meta_nombre",
-            "meta_saldo_inicial", "total_cargos", "total_abonos",
-            "saldo_final_aux"
-        ]
-    ].copy()
+    resumen = pd.DataFrame(resumen_rows)
 
-    resumen = resumen.rename(
-        columns={"meta_saldo_inicial": "saldo_inicial"}
-    )
-
-    # --------------------------------------------------------------------------
-    # Gran total del reporte
-    # --------------------------------------------------------------------------
+    # Totales explícitos del reporte.
+    mask_totales = raw[1].apply(texto_norm).eq("TOTALES")
+    total_rows = raw.index[mask_totales].tolist()
+    n_totales = len(total_rows)
     gran_total = None
-    if es_total_general.any():
-        idx_gt = es_total_general[es_total_general].index[-1]
-        gran_total = parse_amount(raw.iloc[idx_gt, 7])
-        if pd.isna(gran_total):
-            gran_total = None
+    amarre_totales = None
 
-    # Comparación entre suma de movimientos y Total: de CONTPAQ.
+    if n_totales:
+        # Si hay exactamente un total y una cuenta, úsalo como total certificado.
+        if n_totales == 1 and len(resumen) == 1:
+            idx = total_rows[0]
+            tc = parse_amount(raw.iloc[idx, 4])
+            ta = parse_amount(raw.iloc[idx, 5])
+            sf = parse_amount(raw.iloc[idx, 6])
+            if any(pd.isna(x) for x in [tc, ta, sf]):
+                raise ValueError(
+                    f"{file_name}: no fue posible leer la fila Totales "
+                    f"(fila Excel {idx + 1})."
+                )
+            resumen.loc[0, "total_cargos"] = float(tc)
+            resumen.loc[0, "total_abonos"] = float(ta)
+            resumen.loc[0, "saldo_final_aux"] = float(sf)
+            gran_total = float(sf)
+            amarre_totales = (
+                abs(float(tc) - float(movs["cargos"].sum())) <= UMBRAL_TOLERANCIA
+                and abs(float(ta) - float(movs["abonos"].sum())) <= UMBRAL_TOLERANCIA
+            )
+        elif n_totales == len(resumen):
+            # Posible total por cada cuenta: la cuenta activa se obtiene por ffill.
+            explicitos = []
+            for idx in total_rows:
+                codigo = df.loc[idx, "meta_codigo"]
+                if pd.isna(codigo):
+                    continue
+                explicitos.append(
+                    {
+                        "meta_codigo": str(codigo),
+                        "total_cargos_exp": parse_amount(raw.iloc[idx, 4]),
+                        "total_abonos_exp": parse_amount(raw.iloc[idx, 5]),
+                        "saldo_final_exp": parse_amount(raw.iloc[idx, 6]),
+                    }
+                )
+            exp = pd.DataFrame(explicitos)
+            if len(exp) == len(resumen) and exp["meta_codigo"].nunique() == len(resumen):
+                resumen = resumen.merge(exp, on="meta_codigo", how="left")
+                for dst, src in [
+                    ("total_cargos", "total_cargos_exp"),
+                    ("total_abonos", "total_abonos_exp"),
+                    ("saldo_final_aux", "saldo_final_exp"),
+                ]:
+                    resumen[dst] = resumen[src].astype(float)
+                resumen = resumen.drop(
+                    columns=["total_cargos_exp", "total_abonos_exp", "saldo_final_exp"]
+                )
+                gran_total = float(resumen["saldo_final_aux"].sum())
+                amarre_totales = True
+
+    # Comparar detalle contra los totales de cada cuenta.
     sum_mov = (
         movs.groupby("cuenta_uid", as_index=False)
-        .agg(
-            mov_cargos=("cargos", "sum"),
-            mov_abonos=("abonos", "sum"),
-        )
+        .agg(mov_cargos=("cargos", "sum"), mov_abonos=("abonos", "sum"))
     )
     resumen = resumen.merge(sum_mov, on="cuenta_uid", how="left")
     resumen[["mov_cargos", "mov_abonos"]] = resumen[
         ["mov_cargos", "mov_abonos"]
     ].fillna(0.0)
+    resumen["dif_cargos_vs_total"] = resumen["total_cargos"] - resumen["mov_cargos"]
+    resumen["dif_abonos_vs_total"] = resumen["total_abonos"] - resumen["mov_abonos"]
 
-    resumen["dif_cargos_vs_total"] = (
-        resumen["total_cargos"] - resumen["mov_cargos"]
-    )
-    resumen["dif_abonos_vs_total"] = (
-        resumen["total_abonos"] - resumen["mov_abonos"]
-    )
-
-    # Si el propio Total: de cargos/abonos no coincide con el detalle, no
-    # podemos declarar una lectura "verificada".
     mal_detalle = resumen[
         (resumen["dif_cargos_vs_total"].abs() > UMBRAL_TOLERANCIA)
         | (resumen["dif_abonos_vs_total"].abs() > UMBRAL_TOLERANCIA)
     ]
     if not mal_detalle.empty:
         raise ValueError(
-            f"{file_name}: los cargos/abonos del detalle no amarran con el "
-            "'Total:' de CONTPAQ en una o más cuentas. No se certifica la lectura."
+            f"{file_name}: el detalle no amarra con la fila Totales del "
+            "auxiliar ARPON."
         )
+
+    # Validación independiente: secuencia completa del saldo acumulado.
+    sec = validar_secuencia_saldo(movs, resumen)
+    resumen = resumen.merge(sec, on="cuenta_uid", how="left")
+    errores_secuencia = int(resumen["n_errores_saldo_secuencia"].fillna(0).sum())
+    max_error_secuencia = float(
+        resumen["max_error_saldo_secuencia"].fillna(0).max()
+    )
+    if errores_secuencia:
+        raise ValueError(
+            f"{file_name}: se detectaron {errores_secuencia} movimiento(s) cuya "
+            "secuencia de saldo acumulado no puede reproducirse con cargos/abonos."
+        )
+
+    # Neto del periodo, si está impreso.
+    mask_neto = raw[1].apply(texto_norm).eq("NETO PERIODO")
+    neto_periodo = None
+    amarre_neto = None
+    if mask_neto.any():
+        idx_neto = raw.index[mask_neto][-1]
+        candidatos = [raw.iloc[idx_neto, c] for c in range(4, min(7, raw.shape[1]))]
+        for valor in candidatos:
+            if es_vacio(valor):
+                continue
+            n = parse_amount(valor)
+            if not pd.isna(n):
+                neto_periodo = float(n)
+                break
+        if neto_periodo is not None:
+            neto_calc = float(movs["cargos"].sum() - movs["abonos"].sum())
+            amarre_neto = abs(abs(neto_calc) - abs(neto_periodo)) <= UMBRAL_TOLERANCIA
+
+    if gran_total is None:
+        gran_total = float(resumen["saldo_final_aux"].sum())
+
+    suma_saldos = float(resumen["saldo_final_aux"].sum())
+    amarre_gran_total = abs(suma_saldos - gran_total) <= max(
+        UMBRAL_TOLERANCIA, abs(gran_total) * 1e-6
+    )
 
     diag = {
         "archivo": file_name,
-        "n_headers": n_headers,
+        "sistema_origen": "ARPON",
+        "formato": "ARPON_AUXILIAR_CUENTAS",
+        "empresa": empresa or "",
+        "periodo_inicio": periodo_inicio,
+        "periodo_fin": periodo_fin,
+        "n_headers": len(headers),
         "n_totales": n_totales,
-        "n_movs": n_movs,
-        "gran_total": float(gran_total) if gran_total is not None else None,
-        "suma_saldos_cuenta": float(resumen["saldo_final_aux"].sum()),
-        "n_candidatos_no_header": len(candidatos_no_header),
+        "n_movs": int(len(movs)),
+        "gran_total": gran_total,
+        "suma_saldos_cuenta": suma_saldos,
+        "n_candidatos_no_header": 0,
+        "amarre_gran_total": amarre_gran_total,
+        "amarre_totales_detalle": amarre_totales,
+        "neto_periodo": neto_periodo,
+        "amarre_neto_periodo": amarre_neto,
+        "n_errores_saldo_secuencia": errores_secuencia,
+        "max_error_saldo_secuencia": max_error_secuencia,
     }
 
-    if gran_total is not None:
-        diag["amarre_gran_total"] = (
-            abs(diag["suma_saldos_cuenta"] - gran_total)
-            <= max(UMBRAL_TOLERANCIA, abs(gran_total) * 1e-6)
-        )
-    else:
-        diag["amarre_gran_total"] = None
-
     return movs.reset_index(drop=True), resumen.reset_index(drop=True), diag
+
+
+def procesar_archivo_core(file_bytes, file_name):
+    raw = cargar_archivo_robusto(file_bytes, file_name)
+    validar_formato_arpon(raw, file_name)
+    return procesar_formato_arpon(raw, file_name)
 
 
 @st.cache_data(show_spinner=False)
 def procesar_archivo_engine(file_bytes, file_name):
     return procesar_archivo_core(file_bytes, file_name)
 
-
 # ==============================================================================
-# 3. NATURALEZA CONTABLE Y CONCILIACIÓN
+# 3. NATURALEZA CONTABLE Y CONCILIACIÓN ARPON
 # ==============================================================================
 
 def detectar_naturaleza(resumen, movs):
     """
     Detecta naturaleza por cuenta comparando las dos ecuaciones posibles
-    contra el saldo final que reporta CONTPAQ.
+    contra el saldo final reportado por ARPON.
 
     Deudora:
       final = inicial + cargos - abonos
@@ -841,7 +1048,7 @@ def analizar_saldos(movs, resumen_naturaleza):
         if row["naturaleza"] == "INDETERMINADA":
             return "⚫ Naturaleza indeterminada"
         if abs(row["descuadre_origen"]) > UMBRAL_TOLERANCIA:
-            return "🟠 Total CONTPAQ ≠ Detalle"
+            return "🟠 Total fuente ≠ Detalle"
         if row["n_sin_referencia"] > 0:
             return "🔴 Movimientos sin referencia"
         if row["n_montos_negativos"] > 0:
@@ -853,7 +1060,7 @@ def analizar_saldos(movs, resumen_naturaleza):
 
 
 # ==============================================================================
-# 4. FOLIOS, REFERENCIAS Y CRUCES
+# 4. FOLIOS, REFERENCIAS Y CRUCES ARPON
 # ==============================================================================
 
 def analizar_folios(movs, fecha_corte):
@@ -869,8 +1076,9 @@ def analizar_folios(movs, fecha_corte):
     if mv.empty:
         return pd.DataFrame(
             columns=[
-                "archivo", "meta_codigo", "meta_nombre", "naturaleza",
-                "referencia_norm", "primera_fecha", "ultima_fecha", "n_movs",
+                "sistema_origen", "empresa", "archivo", "meta_codigo",
+                "meta_nombre", "naturaleza", "referencia_norm",
+                "primera_fecha", "ultima_fecha", "n_movs",
                 "cargos", "abonos", "saldo_natural", "dias",
                 "antiguedad_observada", "tipo_saldo",
                 "multiples_movimientos", "posible_duplicado_exacto"
@@ -880,7 +1088,8 @@ def analizar_folios(movs, fecha_corte):
     g = (
         mv.groupby(
             [
-                "archivo", "cuenta_uid", "meta_codigo", "meta_nombre",
+                "sistema_origen", "empresa_uid", "empresa", "archivo",
+                "cuenta_uid", "cuenta_logica_uid", "meta_codigo", "meta_nombre",
                 "naturaleza", "referencia_norm"
             ],
             as_index=False,
@@ -941,7 +1150,8 @@ def analizar_folios(movs, fecha_corte):
 
 def detectar_cruces_por_referencia(movs):
     """
-    Misma referencia en MÁS DE UNA cuenta y efectos naturales opuestos.
+    Busca el mismo folio en cuentas distintas, pero SOLO dentro del mismo
+    empresa ARPON, evitando cruces entre empresas distintas.
     """
     mv = movs[
         movs["es_folio"]
@@ -954,8 +1164,9 @@ def detectar_cruces_por_referencia(movs):
     por_cuenta = (
         mv.groupby(
             [
-                "referencia_norm", "meta_codigo", "meta_nombre",
-                "naturaleza"
+                "sistema_origen", "empresa_uid", "empresa",
+                "referencia_norm", "cuenta_logica_uid",
+                "meta_codigo", "meta_nombre", "naturaleza"
             ],
             as_index=False,
         )
@@ -964,13 +1175,15 @@ def detectar_cruces_por_referencia(movs):
             abonos=("abonos", "sum"),
             efecto_natural=("efecto_natural", "sum"),
             n_movs=("efecto_natural", "size"),
+            archivos=("archivo", lambda x: " | ".join(sorted(set(map(str, x))))),
         )
     )
 
+    claves_ref = ["sistema_origen", "empresa_uid", "referencia_norm"]
     nivel_ref = (
-        por_cuenta.groupby("referencia_norm")
+        por_cuenta.groupby(claves_ref)
         .agg(
-            num_cuentas=("meta_codigo", "nunique"),
+            num_cuentas=("cuenta_logica_uid", "nunique"),
             hay_positivo=("efecto_natural", lambda x: (x > UMBRAL_FOLIO).any()),
             hay_negativo=("efecto_natural", lambda x: (x < -UMBRAL_FOLIO).any()),
             neto_global=("efecto_natural", "sum"),
@@ -987,29 +1200,27 @@ def detectar_cruces_por_referencia(movs):
     if refs.empty:
         return pd.DataFrame()
 
-    detalle = por_cuenta[
-        por_cuenta["referencia_norm"].isin(refs["referencia_norm"])
-    ].merge(
-        refs[["referencia_norm", "num_cuentas", "neto_global"]],
-        on="referencia_norm",
-        how="left",
+    detalle = por_cuenta.merge(
+        refs[claves_ref + ["num_cuentas", "neto_global"]],
+        on=claves_ref,
+        how="inner",
     )
-
-    detalle["amarre_aprox"] = (
-        detalle["neto_global"].abs() <= UMBRAL_TOLERANCIA
+    detalle["amarre_aprox"] = detalle["neto_global"].abs() <= UMBRAL_TOLERANCIA
+    detalle["nivel_evidencia"] = np.where(
+        detalle["amarre_aprox"], "ALTA - neto aproximado a cero",
+        "MEDIA - efectos opuestos con remanente"
     )
     return detalle.sort_values(
-        ["referencia_norm", "efecto_natural"], ascending=[True, False]
+        ["sistema_origen", "empresa_uid", "referencia_norm", "efecto_natural"],
+        ascending=[True, True, True, False],
     )
 
 
 def detectar_coincidencias_por_evidencia(movs):
     """
-    Cruces fuertes aunque el folio sea diferente:
-      misma fecha + mismo concepto normalizado + mismo importe absoluto
-      + cuentas distintas + efectos naturales opuestos.
-
-    Se trabaja por grupos, no por similitud difusa de nombres.
+    Coincidencias por fecha + concepto + importe dentro del mismo sistema y
+    empresa. Se clasifican por calidad del amarre para evitar presentar como
+    conciliación fuerte un grupo muchos-a-muchos con remanente.
     """
     mv = movs[
         movs["efecto_natural"].notna()
@@ -1020,18 +1231,20 @@ def detectar_coincidencias_por_evidencia(movs):
     if mv.empty:
         return pd.DataFrame()
 
-    # Excluir movimientos que tienen cargo y abono simultáneamente y netean 0.
     mv = mv[mv["efecto_natural"].abs() > UMBRAL_FOLIO].copy()
-
-    claves = ["fecha", "concepto_norm", "importe_abs"]
+    claves = [
+        "sistema_origen", "empresa_uid", "fecha", "concepto_norm", "importe_abs"
+    ]
 
     grupos = (
         mv.groupby(claves)
         .agg(
-            num_cuentas=("meta_codigo", "nunique"),
+            num_cuentas=("cuenta_logica_uid", "nunique"),
             hay_positivo=("efecto_natural", lambda x: (x > 0).any()),
             hay_negativo=("efecto_natural", lambda x: (x < 0).any()),
             n_movs_grupo=("efecto_natural", "size"),
+            n_positivos=("efecto_natural", lambda x: int((x > 0).sum())),
+            n_negativos=("efecto_natural", lambda x: int((x < 0).sum())),
             neto_grupo=("efecto_natural", "sum"),
         )
         .reset_index()
@@ -1046,15 +1259,30 @@ def detectar_coincidencias_por_evidencia(movs):
     if validos.empty:
         return pd.DataFrame()
 
+    validos["amarre_aprox"] = validos["neto_grupo"].abs() <= UMBRAL_TOLERANCIA
+    validos["nivel_evidencia"] = np.select(
+        [
+            validos["amarre_aprox"]
+            & validos["n_positivos"].eq(1)
+            & validos["n_negativos"].eq(1),
+            validos["amarre_aprox"],
+        ],
+        [
+            "ALTA - correspondencia 1:1",
+            "MEDIA - neto cero con múltiples movimientos",
+        ],
+        default="BAJA - coincidencia parcial con remanente",
+    )
     validos["evidencia_id"] = np.arange(1, len(validos) + 1)
 
     det = mv.merge(validos, on=claves, how="inner")
     cols = [
-        "evidencia_id", "fecha", "concepto", "concepto_norm", "importe_abs",
-        "archivo", "meta_codigo", "meta_nombre", "naturaleza",
+        "evidencia_id", "nivel_evidencia", "amarre_aprox",
+        "sistema_origen", "empresa", "fecha", "concepto", "concepto_norm",
+        "importe_abs", "archivo", "meta_codigo", "meta_nombre", "naturaleza",
         "referencia_original", "referencia_norm", "referencia_fuente",
         "cargos", "abonos", "efecto_natural",
-        "num_cuentas", "n_movs_grupo", "neto_grupo"
+        "num_cuentas", "n_movs_grupo", "n_positivos", "n_negativos", "neto_grupo"
     ]
     return det[cols].sort_values(
         ["evidencia_id", "efecto_natural"], ascending=[True, False]
@@ -1063,7 +1291,8 @@ def detectar_coincidencias_por_evidencia(movs):
 
 def tabla_referencias(movs):
     cols = [
-        "archivo", "fila_origen", "fecha", "meta_codigo", "meta_nombre",
+        "sistema_origen", "empresa", "archivo", "fila_origen", "fecha",
+        "meta_codigo", "meta_nombre",
         "concepto", "referencia_original", "referencia_norm",
         "referencia_tipo", "referencia_fuente", "referencia_recuperada",
         "cargos", "abonos", "naturaleza", "efecto_natural"
@@ -1077,30 +1306,31 @@ def tabla_referencias(movs):
 
 def main():
     st.set_page_config(
-        page_title="Auditoría Master CONTPAQ",
+        page_title="Auditoría ARPON · Hotel Quartz",
         layout="wide",
         page_icon="🛡️",
     )
 
-    st.title("🛡️ Auditoría Master de Saldos (CONTPAQ)")
+    st.title("🛡️ Auditoría de Saldos ARPON · Hotel Quartz")
     st.caption(f"Motor v{APP_VERSION}")
 
     st.markdown(
         """
-        Esta versión:
-        - valida que el auxiliar haya sido leído íntegramente;
-        - detecta automáticamente **naturaleza deudora o acreedora**;
-        - conserva el folio original y normaliza sin destruir prefijos;
-        - puede recuperar un folio desde **Concepto** cuando Referencia está vacía;
-        - separa referencias libres de folios documentales;
-        - detecta movimientos sin referencia por **cantidad, cargos, abonos y bruto**, no solo por neto;
-        - identifica montos negativos/reversos y posibles duplicados exactos;
-        - con varios archivos, busca cruces por referencia y por evidencia contable.
+        Motor exclusivo para auxiliares **ARPON de Hotel Quartz**.
+
+        - valida la estructura **Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo**;
+        - identifica empresa, periodo, cuenta y saldo inicial desde el propio reporte;
+        - valida **cargos, abonos y saldo acumulado movimiento por movimiento**;
+        - detecta automáticamente la **naturaleza deudora o acreedora**;
+        - conserva y normaliza documentos/folios sin destruir prefijos;
+        - puede recuperar un folio desde **Concepto** cuando Docto. está vacío;
+        - identifica movimientos sin referencia, reversos y posibles duplicados;
+        - los cruces se realizan únicamente dentro de la **misma empresa ARPON**.
         """
     )
 
     uploaded_files = st.file_uploader(
-        "📂 Sube uno o varios auxiliares CONTPAQ (Excel o CSV)",
+        "📂 Sube uno o varios Auxiliares de Cuentas de ARPON (Excel o CSV)",
         type=["xlsx", "xls", "xlsm", "csv"],
         accept_multiple_files=True,
     )
@@ -1139,7 +1369,7 @@ def main():
 
     # Evitar que cargar dos veces la misma cuenta pase desapercibido.
     repetidas = (
-        resumen.groupby("meta_codigo")["archivo"]
+        resumen.groupby(["empresa_uid", "meta_codigo"])["archivo"]
         .nunique()
         .loc[lambda s: s > 1]
     )
@@ -1148,7 +1378,7 @@ def main():
             "⚠️ Hay códigos de cuenta presentes en más de un archivo. "
             "No necesariamente es un error, pero revisa que no hayas cargado "
             "dos periodos o copias de la misma cuenta: "
-            + ", ".join(repetidas.index.astype(str))
+            + ", ".join(str(x) for x in repetidas.index)
         )
 
     resumen_nat = detectar_naturaleza(resumen, movs)
@@ -1163,6 +1393,15 @@ def main():
     st.subheader("✅ Validación de lectura")
 
     diag_df = pd.DataFrame(diags)
+
+    st.caption("Sistema contable: ARPON")
+    empresas_arpon = sorted(
+        diag_df["empresa"].dropna().astype(str)
+        .loc[lambda x: x.str.strip().ne("")].unique()
+    )
+    if empresas_arpon:
+        st.caption("Empresa detectada: " + " | ".join(empresas_arpon))
+
     n_archivos = len(diag_df)
     n_cuentas = len(df_audit)
     n_movs = len(movs)
@@ -1171,14 +1410,14 @@ def main():
     if amarres_false:
         st.warning(
             f"{amarres_false} archivo(s) no amarran la suma de saldos por cuenta "
-            "contra el Total general detectado. Revisa si el reporte contiene "
+            "contra el saldo final reportado por ARPON. Revisa si el reporte contiene "
             "agrupaciones adicionales."
         )
     else:
         st.success(
             f"Lectura estructural validada: **{n_archivos} archivo(s)** · "
             f"**{n_cuentas} cuenta(s)** · **{n_movs:,} movimientos**. "
-            "Los cargos y abonos del detalle amarran con cada 'Total:' de CONTPAQ."
+            "La estructura, los totales disponibles y las secuencias de saldo fueron validados."
         )
 
     for _, d in diag_df.iterrows():
@@ -1195,15 +1434,22 @@ def main():
         else:
             estado_amarre = "⚠️"
         st.caption(
-            f"{estado_amarre} {d['archivo']}: "
+            f"{estado_amarre} {d['archivo']} · {'ARPON'} [{d.get('formato', 'N/D')}]: "
             f"{int(d['n_headers'])} cuenta(s), {int(d['n_movs']):,} movimientos, "
-            f"Total general {gt_txt}."
+            f"Total reportado {gt_txt}."
         )
 
     # --------------------------------------------------------------------------
     # KPIs
     # --------------------------------------------------------------------------
-    saldo_total = df_audit["saldo_final_aux"].sum()
+    gran_totales_validos = pd.to_numeric(
+        diag_df.get("gran_total", pd.Series(dtype=float)), errors="coerce"
+    ).dropna()
+    saldo_total = (
+        float(gran_totales_validos.sum())
+        if len(gran_totales_validos) == len(diag_df) and len(diag_df) > 0
+        else float(df_audit["saldo_final_aux"].sum())
+    )
     bruto_sin_ref = df_audit["importe_bruto_sin_referencia"].sum()
     descuadre_abs = df_audit["descuadre_origen"].abs().sum()
     n_sin_ref = int(df_audit["n_sin_referencia"].sum())
@@ -1299,12 +1545,12 @@ def main():
         h6.metric("Folios 90+ observados", len(viejos))
 
         if len(descuadres):
-            st.markdown("#### 🟠 Descuadre contra el saldo final de CONTPAQ")
+            st.markdown("#### 🟠 Descuadre contra el saldo final reportado por ARPON")
             st.dataframe(
                 descuadres[
                     [
-                        "archivo", "meta_codigo", "meta_nombre", "naturaleza",
-                        "saldo_final_aux", "saldo_esperado_motor",
+                        "sistema_origen", "empresa", "archivo", "meta_codigo",
+                        "meta_nombre", "naturaleza", "saldo_final_aux", "saldo_esperado_motor",
                         "descuadre_origen"
                     ]
                 ],
@@ -1419,8 +1665,8 @@ def main():
         )
 
         cols = [
-            "archivo", "meta_codigo", "meta_nombre", "naturaleza",
-            "naturaleza_confianza", "estado", "saldo_inicial",
+            "sistema_origen", "empresa", "archivo", "meta_codigo",
+            "meta_nombre", "naturaleza", "naturaleza_confianza", "estado", "saldo_inicial",
             "total_cargos", "total_abonos", "saldo_final_aux",
             "movs_con_referencia", "movs_sin_referencia",
             "n_sin_referencia", "importe_bruto_sin_referencia",
@@ -1442,7 +1688,7 @@ def main():
                     "Abonos", format="$%.2f"
                 ),
                 "saldo_final_aux": st.column_config.NumberColumn(
-                    "Saldo final CONTPAQ", format="$%.2f"
+                    "Saldo final ARPON", format="$%.2f"
                 ),
                 "movs_con_referencia": st.column_config.NumberColumn(
                     "Efecto con referencia", format="$%.2f"
@@ -1623,22 +1869,24 @@ def main():
         st.dataframe(diag_df, use_container_width=True, hide_index=True)
 
         st.markdown("#### Detección de naturaleza")
+        diag_cols = [
+            "sistema_origen", "empresa", "archivo", "meta_codigo",
+            "meta_nombre", "naturaleza", "naturaleza_confianza",
+            "esperado_deudora", "error_deudora",
+            "esperado_acreedora", "error_acreedora", "saldo_final_aux",
+            "naturaleza_secuencia", "n_errores_saldo_secuencia",
+            "max_error_saldo_secuencia"
+        ]
+        diag_cols = [c for c in diag_cols if c in df_audit.columns]
         st.dataframe(
-            df_audit[
-                [
-                    "archivo", "meta_codigo", "meta_nombre", "naturaleza",
-                    "naturaleza_confianza", "esperado_deudora",
-                    "error_deudora", "esperado_acreedora",
-                    "error_acreedora", "saldo_final_aux"
-                ]
-            ],
+            df_audit[diag_cols],
             use_container_width=True,
             hide_index=True,
         )
 
         st.markdown("#### Definiciones importantes")
         st.info(
-            "• 'Sin referencia' significa columna Referencia vacía y sin folio "
+            "• 'Sin referencia' significa Referencia/Docto. vacío y sin folio "
             "recuperable del Concepto.\n\n"
             "• 'Referencia libre' significa que sí existe texto en Referencia, "
             "pero no tiene forma de folio documental.\n\n"
@@ -1663,7 +1911,7 @@ def main():
     st.download_button(
         "⬇️ Descargar auditoría completa (Excel)",
         data=to_excel_workbook(export_tables),
-        file_name="auditoria_master_contpaq.xlsx",
+        file_name="auditoria_master_saldos.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
