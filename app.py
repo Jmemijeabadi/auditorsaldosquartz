@@ -3,13 +3,19 @@ import pandas as pd
 import numpy as np
 import re
 import unicodedata
+from copy import copy
 from io import BytesIO
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+
 import plotly.graph_objects as go
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "4.0 ARPON · HOTEL QUARTZ"
+APP_VERSION = "4.1 ARPON · HOTEL QUARTZ"
 UMBRAL_TOLERANCIA = 1.0
 UMBRAL_FOLIO = 0.01
 
@@ -17,7 +23,7 @@ UMBRAL_FOLIO = 0.01
 # Se conservan; NO se eliminan durante la normalización.
 PREFIJOS_FOLIO = (
     # Prefijos documentales observados en auxiliares ARPON de Hotel Quartz.
-    "H", "B", "R", "X", "E", "S",
+    "NCTA", "NC", "H", "B", "R", "X", "E", "S",
 )
 
 REFERENCIAS_VACIAS = {
@@ -900,6 +906,9 @@ def detectar_naturaleza(resumen, movs):
 
 def aplicar_naturaleza_a_movimientos(movs, resumen_naturaleza):
     m = movs.copy()
+    # Identificador estable dentro de la ejecución. Permite regresar desde los
+    # grupos de conciliación hasta la fila exacta del auxiliar de origen.
+    m["movimiento_id"] = np.arange(1, len(m) + 1)
     mapa_nat = resumen_naturaleza.set_index("cuenta_uid")["naturaleza"]
     m["naturaleza"] = m["cuenta_uid"].map(mapa_nat)
 
@@ -1278,8 +1287,10 @@ def detectar_coincidencias_por_evidencia(movs):
     det = mv.merge(validos, on=claves, how="inner")
     cols = [
         "evidencia_id", "nivel_evidencia", "amarre_aprox",
-        "sistema_origen", "empresa", "fecha", "concepto", "concepto_norm",
-        "importe_abs", "archivo", "meta_codigo", "meta_nombre", "naturaleza",
+        "movimiento_id", "fila_origen", "sistema_origen", "empresa_uid",
+        "empresa", "fecha", "concepto", "concepto_norm",
+        "importe_abs", "archivo", "cuenta_uid", "cuenta_logica_uid",
+        "meta_codigo", "meta_nombre", "naturaleza",
         "referencia_original", "referencia_norm", "referencia_fuente",
         "cargos", "abonos", "efecto_natural",
         "num_cuentas", "n_movs_grupo", "n_positivos", "n_negativos", "neto_grupo"
@@ -1289,13 +1300,293 @@ def detectar_coincidencias_por_evidencia(movs):
     )
 
 
+def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
+    """
+    Regresa los movimientos con una marca auditable de conciliación.
+
+    CONCILIADO:
+      - el folio tiene efectos opuestos y neto aproximado a cero; o
+      - la evidencia por fecha + concepto + importe tiene neto cero.
+
+    REVISAR:
+      - existen efectos opuestos, pero el grupo conserva un remanente.
+
+    No elimina ni compensa movimientos; únicamente agrega trazabilidad para
+    poder marcar la fila original del auxiliar ARPON.
+    """
+    m = movs.copy()
+    if "movimiento_id" not in m.columns:
+        m["movimiento_id"] = np.arange(1, len(m) + 1)
+
+    registros = {
+        int(mid): {
+            "estado": "SIN MARCA",
+            "nivel": "",
+            "criterios": [],
+            "codigos": [],
+        }
+        for mid in m["movimiento_id"]
+    }
+    rango_estado = {"SIN MARCA": 0, "REVISAR": 1, "CONCILIADO": 2}
+    rango_nivel = {"": 0, "BAJA": 1, "MEDIA": 2, "ALTA": 3}
+
+    def registrar(ids, estado, nivel, criterio, codigo):
+        nivel_base = str(nivel).split(" - ", 1)[0].strip().upper()
+        if nivel_base not in rango_nivel:
+            nivel_base = "BAJA"
+
+        for mid in ids:
+            reg = registros.get(int(mid))
+            if reg is None:
+                continue
+            if rango_estado[estado] > rango_estado[reg["estado"]]:
+                reg["estado"] = estado
+            if rango_nivel[nivel_base] > rango_nivel[reg["nivel"]]:
+                reg["nivel"] = nivel_base
+            if criterio not in reg["criterios"]:
+                reg["criterios"].append(criterio)
+            if codigo not in reg["codigos"]:
+                reg["codigos"].append(codigo)
+
+    if cruces_ref is not None and not cruces_ref.empty:
+        claves = [
+            "sistema_origen", "empresa_uid", "referencia_norm",
+            "amarre_aprox", "nivel_evidencia",
+        ]
+        for _, grupo in cruces_ref[claves].drop_duplicates().iterrows():
+            mask = (
+                m["sistema_origen"].eq(grupo["sistema_origen"])
+                & m["empresa_uid"].eq(grupo["empresa_uid"])
+                & m["referencia_norm"].eq(grupo["referencia_norm"])
+                & m["es_folio"]
+                & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
+            )
+            registrar(
+                m.loc[mask, "movimiento_id"],
+                "CONCILIADO" if bool(grupo["amarre_aprox"]) else "REVISAR",
+                grupo["nivel_evidencia"],
+                "FOLIO",
+                f"REF:{grupo['referencia_norm']}",
+            )
+
+    if evidencias is not None and not evidencias.empty:
+        grupos_evidencia = evidencias[
+            ["evidencia_id", "nivel_evidencia", "amarre_aprox"]
+        ].drop_duplicates()
+        for _, grupo in grupos_evidencia.iterrows():
+            ids = evidencias.loc[
+                evidencias["evidencia_id"].eq(grupo["evidencia_id"]),
+                "movimiento_id",
+            ].drop_duplicates()
+            nivel = str(grupo["nivel_evidencia"]).split(" - ", 1)[0].upper()
+            if nivel == "ALTA":
+                criterio = "EVIDENCIA 1:1"
+            elif nivel == "MEDIA":
+                criterio = "EVIDENCIA GRUPAL"
+            else:
+                criterio = "COINCIDENCIA PARCIAL"
+            registrar(
+                ids,
+                "CONCILIADO" if bool(grupo["amarre_aprox"]) else "REVISAR",
+                grupo["nivel_evidencia"],
+                criterio,
+                f"EVD:{int(grupo['evidencia_id'])}",
+            )
+
+    m["conciliacion_estado"] = m["movimiento_id"].map(
+        lambda mid: registros[int(mid)]["estado"]
+    )
+    m["conciliacion_nivel"] = m["movimiento_id"].map(
+        lambda mid: registros[int(mid)]["nivel"]
+    )
+    m["conciliacion_criterio"] = m["movimiento_id"].map(
+        lambda mid: " + ".join(registros[int(mid)]["criterios"])
+    )
+    m["conciliacion_codigo"] = m["movimiento_id"].map(
+        lambda mid: " | ".join(registros[int(mid)]["codigos"])
+    )
+    m["conciliacion_marcada"] = m["conciliacion_estado"].ne("SIN MARCA")
+    return m
+
+
+def _buscar_fila_encabezado_arpon(ws):
+    limite = min(ws.max_row, 60)
+    for fila in range(1, limite + 1):
+        vals = [texto_norm(ws.cell(fila, col).value) for col in range(1, 8)]
+        if (
+            vals[0] == "POLIZA"
+            and vals[1] == "FECHA"
+            and vals[2].startswith("DOCTO")
+            and vals[3] == "CONCEPTO"
+            and vals[4] == "CARGO"
+            and vals[5] == "ABONO"
+            and vals[6] == "SALDO"
+        ):
+            return fila
+    raise ValueError("No se encontró el encabezado ARPON en el libro de origen.")
+
+
+def _libro_desde_archivo(file_bytes, file_name):
+    lower = file_name.lower()
+    if lower.endswith((".xlsx", ".xlsm")):
+        return load_workbook(
+            BytesIO(file_bytes),
+            keep_vba=lower.endswith(".xlsm"),
+            keep_links=True,
+        )
+
+    # CSV/XLS se convierten a XLSX para poder entregar el marcado visual.
+    raw = cargar_archivo_robusto(file_bytes, file_name)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Auxiliar ARPON"
+    for fila_idx, valores in enumerate(
+        raw.itertuples(index=False, name=None), start=1
+    ):
+        for col_idx, valor in enumerate(valores, start=1):
+            if pd.isna(valor):
+                valor = None
+            elif isinstance(valor, pd.Timestamp):
+                valor = valor.to_pydatetime()
+            ws.cell(fila_idx, col_idx, valor)
+    return wb
+
+
+def construir_auxiliar_marcado(file_bytes, file_name, marcas):
+    """Conserva el auxiliar y agrega color + código en la fila conciliada."""
+    wb = _libro_desde_archivo(file_bytes, file_name)
+    ws = wb.worksheets[0]
+    fila_header = _buscar_fila_encabezado_arpon(ws)
+
+    columna_estado = None
+    for col in range(8, ws.max_column + 1):
+        if texto_norm(ws.cell(fila_header, col).value) == "CONCILIACION":
+            columna_estado = col
+            break
+    if columna_estado is None:
+        columna_estado = max(8, ws.max_column + 1)
+
+    celda_header = ws.cell(fila_header, columna_estado)
+    fuente_header = ws.cell(fila_header, 7)
+    if celda_header.coordinate != fuente_header.coordinate:
+        celda_header._style = copy(fuente_header._style)
+        celda_header.number_format = fuente_header.number_format
+        celda_header.alignment = copy(fuente_header.alignment)
+    celda_header.value = "Conciliación"
+    celda_header.font = copy(celda_header.font)
+    celda_header.font = Font(
+        name=celda_header.font.name,
+        size=celda_header.font.size,
+        bold=True,
+        color=celda_header.font.color,
+    )
+    celda_header.alignment = Alignment(horizontal="center", vertical="center")
+
+    verde = PatternFill("solid", fgColor="C6EFCE")
+    verde_suave = PatternFill("solid", fgColor="EAF4E3")
+    amarillo = PatternFill("solid", fgColor="FFEB9C")
+    amarillo_suave = PatternFill("solid", fgColor="FFF7D6")
+
+    leyenda = [
+        (1, "Marca de conciliación"),
+        (2, "✓ Verde = conciliado"),
+        (3, "⚠ Amarillo = revisar remanente"),
+    ]
+    for fila, texto in leyenda:
+        celda = ws.cell(fila, columna_estado)
+        if es_vacio(celda.value):
+            celda.value = texto
+            celda.font = Font(bold=(fila == 1), color="1F1F1F", size=10)
+            celda.fill = verde if fila == 2 else amarillo if fila == 3 else verde_suave
+
+    for _, marca in marcas.sort_values("fila_origen").iterrows():
+        fila = int(marca["fila_origen"])
+        if fila < 1 or fila > ws.max_row:
+            continue
+
+        conciliado = marca["conciliacion_estado"] == "CONCILIADO"
+        simbolo = "✓" if conciliado else "⚠"
+        texto = (
+            f"{simbolo} {marca['conciliacion_estado']} · "
+            f"{marca['conciliacion_criterio']} · {marca['conciliacion_codigo']}"
+        )
+        celda = ws.cell(fila, columna_estado)
+        celda.value = texto
+        celda.fill = verde if conciliado else amarillo
+        celda.font = Font(
+            bold=True,
+            color="006100" if conciliado else "9C6500",
+            size=10,
+        )
+        celda.alignment = Alignment(vertical="center", wrap_text=False)
+
+        relleno_fila = verde_suave if conciliado else amarillo_suave
+        for col in range(1, columna_estado):
+            origen = ws.cell(fila, col)
+            if origen.fill is None or origen.fill.fill_type is None:
+                origen.fill = relleno_fila
+
+    letra_estado = ws.cell(1, columna_estado).column_letter
+    ws.column_dimensions[letra_estado].width = max(
+        ws.column_dimensions[letra_estado].width or 0,
+        58,
+    )
+
+    output = BytesIO()
+    extension = ".xlsm" if file_name.lower().endswith(".xlsm") else ".xlsx"
+    wb.save(output)
+    nombre_salida = f"{Path(file_name).stem}_MARCADO{extension}"
+    return output.getvalue(), nombre_salida
+
+
+@st.cache_data(show_spinner=False)
+def construir_descarga_auxiliares_marcados(archivos, movs):
+    """Devuelve un XLSX/XLSM si es uno, o un ZIP si se cargaron varios."""
+    resultados = []
+    nombres_usados = set()
+
+    for file_name, file_bytes in archivos:
+        marcas = movs[
+            movs["archivo"].eq(file_name)
+            & movs["conciliacion_marcada"]
+        ].copy()
+        data, nombre = construir_auxiliar_marcado(file_bytes, file_name, marcas)
+
+        base = Path(nombre).stem
+        extension = Path(nombre).suffix
+        candidato = nombre
+        i = 2
+        while candidato in nombres_usados:
+            candidato = f"{base}_{i}{extension}"
+            i += 1
+        nombres_usados.add(candidato)
+        resultados.append((candidato, data))
+
+    if len(resultados) == 1:
+        nombre, data = resultados[0]
+        mime = (
+            "application/vnd.ms-excel.sheet.macroEnabled.12"
+            if nombre.lower().endswith(".xlsm")
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        return data, nombre, mime
+
+    output = BytesIO()
+    with ZipFile(output, mode="w", compression=ZIP_DEFLATED) as zf:
+        for nombre, data in resultados:
+            zf.writestr(nombre, data)
+    return output.getvalue(), "auxiliares_ARPON_MARCADOS.zip", "application/zip"
+
+
 def tabla_referencias(movs):
     cols = [
         "sistema_origen", "empresa", "archivo", "fila_origen", "fecha",
         "meta_codigo", "meta_nombre",
         "concepto", "referencia_original", "referencia_norm",
         "referencia_tipo", "referencia_fuente", "referencia_recuperada",
-        "cargos", "abonos", "naturaleza", "efecto_natural"
+        "cargos", "abonos", "naturaleza", "efecto_natural",
+        "conciliacion_estado", "conciliacion_nivel",
+        "conciliacion_criterio", "conciliacion_codigo",
     ]
     return movs[cols].copy()
 
@@ -1325,7 +1616,8 @@ def main():
         - conserva y normaliza documentos/folios sin destruir prefijos;
         - puede recuperar un folio desde **Concepto** cuando Docto. está vacío;
         - identifica movimientos sin referencia, reversos y posibles duplicados;
-        - los cruces se realizan únicamente dentro de la **misma empresa ARPON**.
+        - los cruces se realizan únicamente dentro de la **misma empresa ARPON**;
+        - genera una copia del auxiliar con **color y código de conciliación**.
         """
     )
 
@@ -1384,6 +1676,11 @@ def main():
     resumen_nat = detectar_naturaleza(resumen, movs)
     movs = aplicar_naturaleza_a_movimientos(movs, resumen_nat)
     movs = marcar_duplicados_exactos(movs)
+    df_cruces_ref = detectar_cruces_por_referencia(movs)
+    df_evidencia = detectar_coincidencias_por_evidencia(movs)
+    movs = marcar_movimientos_conciliacion(
+        movs, df_cruces_ref, df_evidencia
+    )
     df_audit = analizar_saldos(movs, resumen_nat)
 
     # --------------------------------------------------------------------------
@@ -1455,9 +1752,6 @@ def main():
     n_sin_ref = int(df_audit["n_sin_referencia"].sum())
     n_revisar = int((df_audit["estado"] != "🟢 OK").sum())
 
-    df_cruces_ref = detectar_cruces_por_referencia(movs)
-    df_evidencia = detectar_coincidencias_por_evidencia(movs)
-
     n_refs_cruce = (
         int(df_cruces_ref["referencia_norm"].nunique())
         if not df_cruces_ref.empty else 0
@@ -1465,6 +1759,12 @@ def main():
     n_evidencias = (
         int(df_evidencia["evidencia_id"].nunique())
         if not df_evidencia.empty else 0
+    )
+    n_partidas_conciliadas = int(
+        movs["conciliacion_estado"].eq("CONCILIADO").sum()
+    )
+    n_partidas_revisar = int(
+        movs["conciliacion_estado"].eq("REVISAR").sum()
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -1482,6 +1782,11 @@ def main():
     k4.metric("Cruces por folio", n_refs_cruce)
     k5.metric("Cruces por evidencia", n_evidencias)
     k6.metric("Cuentas a revisar", n_revisar)
+    st.caption(
+        f"Marcas para auxiliares: {n_partidas_conciliadas:,} partida(s) "
+        f"conciliada(s) y {n_partidas_revisar:,} partida(s) con remanente "
+        "para revisión."
+    )
 
     # Fecha de corte
     fmax = movs["fecha"].max()
@@ -1756,6 +2061,14 @@ def main():
     # --------------------------------------------------------------------------
     with tabs[3]:
         st.subheader("🔀 Cruces y conciliación entre cuentas")
+        c1, c2 = st.columns(2)
+        c1.metric("Partidas conciliadas", f"{n_partidas_conciliadas:,}")
+        c2.metric("Coincidencias a revisar", f"{n_partidas_revisar:,}")
+        st.caption(
+            "En el auxiliar marcado, verde significa grupo con neto aproximado "
+            "a cero; amarillo significa efectos opuestos con remanente y requiere "
+            "revisión."
+        )
 
         st.markdown("#### A. Cruces por el mismo folio")
         if df_cruces_ref.empty:
@@ -1917,6 +2230,29 @@ def main():
             "spreadsheetml.sheet"
         ),
     )
+
+    if n_partidas_conciliadas or n_partidas_revisar:
+        archivos_origen = [
+            (uf.name, uf.getvalue()) for uf in uploaded_files
+        ]
+        data_marcada, nombre_marcado, mime_marcado = (
+            construir_descarga_auxiliares_marcados(archivos_origen, movs)
+        )
+        st.download_button(
+            "🎨 Descargar auxiliar(es) con conciliación marcada",
+            data=data_marcada,
+            file_name=nombre_marcado,
+            mime=mime_marcado,
+            help=(
+                "Agrega una columna Conciliación y colorea las filas sin modificar "
+                "póliza, fecha, documento, concepto, cargos, abonos ni saldo."
+            ),
+        )
+    else:
+        st.info(
+            "No hay partidas de conciliación para marcar con los archivos cargados. "
+            "Los cruces requieren movimientos relacionados entre cuentas."
+        )
 
 
 if __name__ == "__main__":
