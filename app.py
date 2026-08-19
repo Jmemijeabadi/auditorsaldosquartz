@@ -15,7 +15,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "4.1 ARPON · HOTEL QUARTZ"
+APP_VERSION = "4.2 ARPON · HOTEL QUARTZ"
 UMBRAL_TOLERANCIA = 1.0
 UMBRAL_FOLIO = 0.01
 
@@ -1811,7 +1811,7 @@ def main():
             "🔎 Hallazgos",
             "🚦 Semáforo",
             "📑 Folios",
-            "🔀 Cruces / Conciliación",
+            "✅ Conciliación marcada",
             "🏷️ Referencias",
             "📉 Gráficos",
             "🧪 Diagnóstico",
@@ -2065,10 +2065,78 @@ def main():
         c1.metric("Partidas conciliadas", f"{n_partidas_conciliadas:,}")
         c2.metric("Coincidencias a revisar", f"{n_partidas_revisar:,}")
         st.caption(
-            "En el auxiliar marcado, verde significa grupo con neto aproximado "
+            "En pantalla y en el auxiliar descargado, verde significa grupo con neto aproximado "
             "a cero; amarillo significa efectos opuestos con remanente y requiere "
             "revisión."
         )
+
+        st.markdown("#### Partidas marcadas")
+        st.caption(
+            "Estas son exactamente las filas que recibirán color y código en el "
+            "auxiliar descargado."
+        )
+        partidas_pantalla = movs[movs["conciliacion_marcada"]].copy()
+        if partidas_pantalla.empty:
+            st.info(
+                "No hay partidas para marcar. Carga al mismo tiempo los auxiliares "
+                "de las cuentas que deseas conciliar."
+            )
+        else:
+            partidas_pantalla = partidas_pantalla[
+                [
+                    "conciliacion_estado", "conciliacion_nivel",
+                    "conciliacion_criterio", "conciliacion_codigo",
+                    "archivo", "fila_origen", "fecha", "meta_codigo",
+                    "poliza", "referencia_original", "concepto",
+                    "cargos", "abonos", "efecto_natural",
+                ]
+            ].sort_values(
+                ["conciliacion_estado", "archivo", "fila_origen"]
+            )
+            partidas_pantalla = partidas_pantalla.rename(
+                columns={
+                    "conciliacion_estado": "Estado",
+                    "conciliacion_nivel": "Nivel",
+                    "conciliacion_criterio": "Criterio",
+                    "conciliacion_codigo": "Código",
+                    "archivo": "Archivo",
+                    "fila_origen": "Fila ARPON",
+                    "fecha": "Fecha",
+                    "meta_codigo": "Cuenta",
+                    "poliza": "Póliza",
+                    "referencia_original": "Docto.",
+                    "concepto": "Concepto",
+                    "cargos": "Cargo",
+                    "abonos": "Abono",
+                    "efecto_natural": "Efecto natural",
+                }
+            )
+
+            def color_partida(row):
+                if row["Estado"] == "CONCILIADO":
+                    estilo = "background-color: #EAF4E3; color: #006100;"
+                else:
+                    estilo = "background-color: #FFF7D6; color: #9C6500;"
+                return [estilo] * len(row)
+
+            tabla_marcada = (
+                partidas_pantalla.style
+                .apply(color_partida, axis=1)
+                .format(
+                    {
+                        "Cargo": "${:,.2f}",
+                        "Abono": "${:,.2f}",
+                        "Efecto natural": "${:,.2f}",
+                    },
+                    na_rep="",
+                )
+            )
+            st.dataframe(
+                tabla_marcada,
+                use_container_width=True,
+                hide_index=True,
+                height=min(620, 85 + 35 * len(partidas_pantalla)),
+            )
 
         st.markdown("#### A. Cruces por el mismo folio")
         if df_cruces_ref.empty:
