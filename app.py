@@ -15,7 +15,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "4.3 ARPON · HOTEL QUARTZ"
+APP_VERSION = "4.4 ARPON · HOTEL QUARTZ"
 UMBRAL_TOLERANCIA = 1.0
 UMBRAL_FOLIO = 0.01
 
@@ -1640,6 +1640,73 @@ def tabla_referencias(movs):
     return movs[cols].copy()
 
 
+def aplicar_filtros_tabla(
+    df,
+    empresas=None,
+    archivos=None,
+    cuentas=None,
+    fecha_desde=None,
+    fecha_hasta=None,
+    busqueda="",
+):
+    """Aplica una misma barra de filtros a tablas con estructuras distintas."""
+    if df is None:
+        return pd.DataFrame()
+
+    x = df.copy()
+    if empresas is not None and "empresa" in x.columns:
+        x = x[x["empresa"].fillna("").astype(str).isin(empresas)]
+
+    if archivos is not None:
+        if "archivo" in x.columns:
+            x = x[x["archivo"].fillna("").astype(str).isin(archivos)]
+        elif "archivos" in x.columns:
+            if not archivos:
+                x = x.iloc[0:0]
+            else:
+                patron = "|".join(re.escape(str(a)) for a in archivos)
+                x = x[
+                    x["archivos"].fillna("").astype(str)
+                    .str.contains(patron, regex=True)
+                ]
+
+    if cuentas is not None and "meta_codigo" in x.columns:
+        x = x[x["meta_codigo"].fillna("").astype(str).isin(cuentas)]
+
+    columna_fecha = None
+    for candidata in ["fecha", "primera_fecha"]:
+        if candidata in x.columns:
+            columna_fecha = candidata
+            break
+    if columna_fecha and fecha_desde is not None and fecha_hasta is not None:
+        fechas = pd.to_datetime(x[columna_fecha], errors="coerce")
+        desde = pd.Timestamp(fecha_desde)
+        hasta = pd.Timestamp(fecha_hasta) + pd.Timedelta(days=1)
+        x = x[fechas.ge(desde) & fechas.lt(hasta)]
+
+    termino = texto_norm(busqueda)
+    if termino:
+        columnas_busqueda = [
+            c for c in [
+                "archivo", "archivos", "meta_codigo", "meta_nombre",
+                "poliza", "tipo_poliza", "concepto", "concepto_norm",
+                "referencia_original", "referencia_norm", "estado",
+                "naturaleza", "nivel_evidencia", "conciliacion_estado",
+                "conciliacion_criterio", "conciliacion_codigo",
+            ]
+            if c in x.columns
+        ]
+        if columnas_busqueda:
+            coincide = pd.Series(False, index=x.index)
+            for col in columnas_busqueda:
+                coincide = coincide | x[col].apply(texto_norm).str.contains(
+                    termino, regex=False, na=False
+                )
+            x = x[coincide]
+
+    return x
+
+
 # ==============================================================================
 # 5. UI
 # ==============================================================================
@@ -1855,6 +1922,97 @@ def main():
     folios = analizar_folios(movs, corte)
 
     # --------------------------------------------------------------------------
+    # Filtros generales de tablas
+    # --------------------------------------------------------------------------
+    st.divider()
+    with st.expander("🎛️ Filtros de las tablas", expanded=True):
+        st.caption(
+            "Estos filtros se aplican a las tablas en todas las pestañas. Los "
+            "indicadores superiores y los archivos exportados conservan los "
+            "resultados completos."
+        )
+        fg1, fg2, fg3 = st.columns(3)
+        opciones_empresas = sorted(
+            movs["empresa"].fillna("").astype(str)
+            .loc[lambda s: s.str.strip().ne("")].unique()
+        )
+        opciones_archivos = sorted(
+            movs["archivo"].fillna("").astype(str).unique()
+        )
+        opciones_cuentas = sorted(
+            movs["meta_codigo"].fillna("").astype(str).unique()
+        )
+        empresas_filtro = fg1.multiselect(
+            "Empresa",
+            opciones_empresas,
+            default=opciones_empresas,
+            key="filtro_global_empresa",
+        )
+        archivos_filtro = fg2.multiselect(
+            "Archivo",
+            opciones_archivos,
+            default=opciones_archivos,
+            key="filtro_global_archivo",
+        )
+        cuentas_filtro = fg3.multiselect(
+            "Cuenta contable",
+            opciones_cuentas,
+            default=opciones_cuentas,
+            key="filtro_global_cuenta",
+        )
+
+        fg4, fg5 = st.columns([1, 2])
+        fecha_min = movs["fecha"].min()
+        fecha_max = movs["fecha"].max()
+        if pd.notna(fecha_min) and pd.notna(fecha_max):
+            rango_fechas = fg4.date_input(
+                "Fecha del movimiento",
+                value=(fecha_min.date(), fecha_max.date()),
+                min_value=fecha_min.date(),
+                max_value=fecha_max.date(),
+                key="filtro_global_fecha",
+            )
+            if isinstance(rango_fechas, (tuple, list)) and len(rango_fechas) == 2:
+                fecha_desde_filtro, fecha_hasta_filtro = rango_fechas
+            else:
+                fecha_desde_filtro = rango_fechas
+                fecha_hasta_filtro = rango_fechas
+        else:
+            fecha_desde_filtro = None
+            fecha_hasta_filtro = None
+
+        busqueda_filtro = fg5.text_input(
+            "Buscar en las tablas",
+            placeholder=(
+                "Folio, póliza, concepto, cuenta, archivo, estado o código..."
+            ),
+            key="filtro_global_busqueda",
+        )
+
+    filtros_tabla = {
+        "empresas": empresas_filtro if opciones_empresas else None,
+        "archivos": archivos_filtro,
+        "cuentas": cuentas_filtro,
+        "fecha_desde": fecha_desde_filtro,
+        "fecha_hasta": fecha_hasta_filtro,
+        "busqueda": busqueda_filtro,
+    }
+    movs_vista = aplicar_filtros_tabla(movs, **filtros_tabla)
+    audit_vista = aplicar_filtros_tabla(df_audit, **filtros_tabla)
+    folios_vista = aplicar_filtros_tabla(folios, **filtros_tabla)
+    cruces_ref_vista = aplicar_filtros_tabla(
+        df_cruces_ref, **filtros_tabla
+    )
+    evidencia_vista = aplicar_filtros_tabla(
+        df_evidencia, **filtros_tabla
+    )
+    diag_vista = aplicar_filtros_tabla(diag_df, **filtros_tabla)
+    st.caption(
+        f"Resultado de filtros: {len(movs_vista):,} de {len(movs):,} "
+        f"movimiento(s) · {len(audit_vista):,} de {len(df_audit):,} cuenta(s)."
+    )
+
+    # --------------------------------------------------------------------------
     # Pestañas
     # --------------------------------------------------------------------------
     tabs = st.tabs(
@@ -1878,18 +2036,24 @@ def main():
             "Los hallazgos son independientes. Una cuenta puede tener más de uno."
         )
 
-        sin_ref_movs = movs[~movs["tiene_referencia"]].copy()
-        refs_rec = movs[movs["referencia_recuperada"]].copy()
-        negativos = movs[(movs["cargos"] < 0) | (movs["abonos"] < 0)].copy()
-        duplicados = movs[movs["posible_duplicado_exacto"]].copy()
-        descuadres = df_audit[
-            df_audit["descuadre_origen"].abs() > UMBRAL_TOLERANCIA
+        sin_ref_movs = movs_vista[~movs_vista["tiene_referencia"]].copy()
+        refs_rec = movs_vista[movs_vista["referencia_recuperada"]].copy()
+        negativos = movs_vista[
+            (movs_vista["cargos"] < 0) | (movs_vista["abonos"] < 0)
         ].copy()
-        contrarios = folios[
-            folios["tipo_saldo"].str.contains("contrario", case=False, na=False)
+        duplicados = movs_vista[
+            movs_vista["posible_duplicado_exacto"]
         ].copy()
-        viejos = folios[
-            folios["antiguedad_observada"].eq("90+")
+        descuadres = audit_vista[
+            audit_vista["descuadre_origen"].abs() > UMBRAL_TOLERANCIA
+        ].copy()
+        contrarios = folios_vista[
+            folios_vista["tipo_saldo"].str.contains(
+                "contrario", case=False, na=False
+            )
+        ].copy()
+        viejos = folios_vista[
+            folios_vista["antiguedad_observada"].eq("90+")
         ].copy()
 
         h1, h2, h3, h4, h5, h6 = st.columns(6)
@@ -2016,8 +2180,8 @@ def main():
             key="solo_problemas",
         )
         show = (
-            df_audit[df_audit["estado"] != "🟢 OK"]
-            if solo_problemas else df_audit
+            audit_vista[audit_vista["estado"] != "🟢 OK"]
+            if solo_problemas else audit_vista
         )
 
         cols = [
@@ -2073,7 +2237,7 @@ def main():
         )
 
         orden = ["0-30", "31-60", "61-90", "90+"]
-        positivos = folios[folios["saldo_natural"] > 0].copy()
+        positivos = folios_vista[folios_vista["saldo_natural"] > 0].copy()
         aging = (
             positivos.groupby("antiguedad_observada")["saldo_natural"]
             .agg(num_folios="count", saldo="sum")
@@ -2083,23 +2247,23 @@ def main():
         )
         st.dataframe(aging, use_container_width=True, hide_index=True)
 
-        if not folios.empty:
+        if not folios_vista.empty:
             nat_sel = st.multiselect(
                 "Naturaleza",
-                sorted(folios["naturaleza"].dropna().unique()),
-                default=sorted(folios["naturaleza"].dropna().unique()),
+                sorted(folios_vista["naturaleza"].dropna().unique()),
+                default=sorted(folios_vista["naturaleza"].dropna().unique()),
             )
             edades_sel = st.multiselect(
                 "Antigüedad observada",
                 orden,
                 default=orden,
             )
-            fv = folios[
-                folios["naturaleza"].isin(nat_sel)
-                & folios["antiguedad_observada"].isin(edades_sel)
+            fv = folios_vista[
+                folios_vista["naturaleza"].isin(nat_sel)
+                & folios_vista["antiguedad_observada"].isin(edades_sel)
             ]
         else:
-            fv = folios
+            fv = folios_vista
 
         st.dataframe(
             fv,
@@ -2126,7 +2290,31 @@ def main():
             "Estas son exactamente las filas que recibirán color y código en el "
             "auxiliar descargado."
         )
-        partidas_pantalla = movs[movs["conciliacion_marcada"]].copy()
+        partidas_base = movs_vista[movs_vista["conciliacion_marcada"]].copy()
+        pc1, pc2 = st.columns(2)
+        estados_disponibles = sorted(
+            partidas_base["conciliacion_estado"].dropna().unique()
+        )
+        niveles_disponibles = sorted(
+            partidas_base["conciliacion_nivel"].dropna()
+            .loc[lambda s: s.astype(str).str.strip().ne("")].unique()
+        )
+        estados_conciliacion = pc1.multiselect(
+            "Estado de conciliación",
+            estados_disponibles,
+            default=estados_disponibles,
+            key="filtro_conciliacion_estado",
+        )
+        niveles_conciliacion = pc2.multiselect(
+            "Nivel de evidencia",
+            niveles_disponibles,
+            default=niveles_disponibles,
+            key="filtro_conciliacion_nivel",
+        )
+        partidas_pantalla = partidas_base[
+            partidas_base["conciliacion_estado"].isin(estados_conciliacion)
+            & partidas_base["conciliacion_nivel"].isin(niveles_conciliacion)
+        ].copy()
         if partidas_pantalla.empty:
             st.info(
                 "No hay partidas para marcar. Carga al mismo tiempo los auxiliares "
@@ -2190,14 +2378,14 @@ def main():
             )
 
         st.markdown("#### A. Cruces adicionales entre cuentas por el mismo folio")
-        if df_cruces_ref.empty:
+        if cruces_ref_vista.empty:
             st.info(
                 "No se encontraron folios idénticos con efectos opuestos "
                 "entre cuentas cargadas."
             )
         else:
             st.dataframe(
-                df_cruces_ref,
+                cruces_ref_vista,
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2208,17 +2396,17 @@ def main():
             "efecto natural opuesto entre cuentas. Es evidencia para conciliar; "
             "no se basa en similitud difusa de nombres."
         )
-        if df_evidencia.empty:
+        if evidencia_vista.empty:
             st.info(
                 "No se encontraron coincidencias fuertes entre las cuentas cargadas."
             )
         else:
             st.success(
-                f"Se encontraron {df_evidencia['evidencia_id'].nunique():,} "
+                f"Se encontraron {evidencia_vista['evidencia_id'].nunique():,} "
                 "grupo(s) de evidencia."
             )
             st.dataframe(
-                df_evidencia,
+                evidencia_vista,
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2228,7 +2416,7 @@ def main():
     # --------------------------------------------------------------------------
     with tabs[4]:
         st.subheader("🏷️ Auditoría de referencias")
-        refs = tabla_referencias(movs)
+        refs = tabla_referencias(movs_vista)
 
         tipos = (
             refs["referencia_tipo"].fillna("VACIA").value_counts()
@@ -2255,10 +2443,10 @@ def main():
     with tabs[5]:
         st.subheader("📉 Composición del saldo por naturaleza")
 
-        saldo_ini = df_audit["saldo_inicial"].sum()
-        con_ref = df_audit["movs_con_referencia"].sum()
-        sin_ref = df_audit["movs_sin_referencia"].sum()
-        desc = df_audit["descuadre_origen"].sum()
+        saldo_ini = audit_vista["saldo_inicial"].sum()
+        con_ref = audit_vista["movs_con_referencia"].sum()
+        sin_ref = audit_vista["movs_sin_referencia"].sum()
+        desc = audit_vista["descuadre_origen"].sum()
 
         fig = go.Figure(
             data=[
@@ -2298,7 +2486,7 @@ def main():
         st.subheader("🧪 Diagnóstico técnico")
 
         st.markdown("#### Archivos")
-        st.dataframe(diag_df, use_container_width=True, hide_index=True)
+        st.dataframe(diag_vista, use_container_width=True, hide_index=True)
 
         st.markdown("#### Detección de naturaleza")
         diag_cols = [
@@ -2311,7 +2499,7 @@ def main():
         ]
         diag_cols = [c for c in diag_cols if c in df_audit.columns]
         st.dataframe(
-            df_audit[diag_cols],
+            audit_vista[diag_cols],
             use_container_width=True,
             hide_index=True,
         )
