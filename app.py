@@ -15,7 +15,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "4.2 ARPON · HOTEL QUARTZ"
+APP_VERSION = "4.3 ARPON · HOTEL QUARTZ"
 UMBRAL_TOLERANCIA = 1.0
 UMBRAL_FOLIO = 0.01
 
@@ -1305,7 +1305,8 @@ def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
     Regresa los movimientos con una marca auditable de conciliación.
 
     CONCILIADO:
-      - el folio tiene efectos opuestos y neto aproximado a cero; o
+      - el folio se salda dentro de la misma cuenta; o
+      - el folio cruza cuentas con efectos opuestos y neto aproximado a cero; o
       - la evidencia por fecha + concepto + importe tiene neto cero.
 
     REVISAR:
@@ -1347,6 +1348,54 @@ def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
                 reg["criterios"].append(criterio)
             if codigo not in reg["codigos"]:
                 reg["codigos"].append(codigo)
+
+    # Conciliación principal del auxiliar: cargos y abonos del mismo folio
+    # dentro de la misma cuenta. Esta regla funciona incluso cuando el usuario
+    # carga un solo auxiliar ARPON.
+    folios_cuenta = m[
+        m["es_folio"]
+        & m["efecto_natural"].notna()
+        & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
+    ].copy()
+    if not folios_cuenta.empty:
+        claves_cuenta = [
+            "sistema_origen", "empresa_uid", "cuenta_uid", "referencia_norm"
+        ]
+        grupos_cuenta = (
+            folios_cuenta.groupby(claves_cuenta, as_index=False)
+            .agg(
+                n_movs=("movimiento_id", "size"),
+                hay_positivo=(
+                    "efecto_natural", lambda x: (x > UMBRAL_FOLIO).any()
+                ),
+                hay_negativo=(
+                    "efecto_natural", lambda x: (x < -UMBRAL_FOLIO).any()
+                ),
+                neto_cuenta=("efecto_natural", "sum"),
+            )
+        )
+        grupos_cuenta = grupos_cuenta[
+            (grupos_cuenta["n_movs"] > 1)
+            & grupos_cuenta["hay_positivo"]
+            & grupos_cuenta["hay_negativo"]
+        ]
+
+        for _, grupo in grupos_cuenta.iterrows():
+            amarra = abs(float(grupo["neto_cuenta"])) <= UMBRAL_TOLERANCIA
+            mask = (
+                m["sistema_origen"].eq(grupo["sistema_origen"])
+                & m["empresa_uid"].eq(grupo["empresa_uid"])
+                & m["cuenta_uid"].eq(grupo["cuenta_uid"])
+                & m["referencia_norm"].eq(grupo["referencia_norm"])
+                & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
+            )
+            registrar(
+                m.loc[mask, "movimiento_id"],
+                "CONCILIADO" if amarra else "REVISAR",
+                "ALTA" if amarra else "MEDIA",
+                "FOLIO SALDADO" if amarra else "FOLIO PARCIAL",
+                f"CTA:{grupo['referencia_norm']}",
+            )
 
     if cruces_ref is not None and not cruces_ref.empty:
         claves = [
@@ -1752,9 +1801,11 @@ def main():
     n_sin_ref = int(df_audit["n_sin_referencia"].sum())
     n_revisar = int((df_audit["estado"] != "🟢 OK").sum())
 
-    n_refs_cruce = (
-        int(df_cruces_ref["referencia_norm"].nunique())
-        if not df_cruces_ref.empty else 0
+    n_folios_conciliados = int(
+        movs[
+            movs["conciliacion_estado"].eq("CONCILIADO")
+            & movs["es_folio"]
+        ][["cuenta_uid", "referencia_norm"]].drop_duplicates().shape[0]
     )
     n_evidencias = (
         int(df_evidencia["evidencia_id"].nunique())
@@ -1779,7 +1830,7 @@ def main():
         f"${descuadre_abs:,.2f}",
         help="Suma de valores absolutos por cuenta; evita compensar + y -.",
     )
-    k4.metric("Cruces por folio", n_refs_cruce)
+    k4.metric("Folios conciliados", n_folios_conciliados)
     k5.metric("Cruces por evidencia", n_evidencias)
     k6.metric("Cuentas a revisar", n_revisar)
     st.caption(
@@ -2060,7 +2111,7 @@ def main():
     # Cruces / conciliación
     # --------------------------------------------------------------------------
     with tabs[3]:
-        st.subheader("🔀 Cruces y conciliación entre cuentas")
+        st.subheader("✅ Conciliación de partidas")
         c1, c2 = st.columns(2)
         c1.metric("Partidas conciliadas", f"{n_partidas_conciliadas:,}")
         c2.metric("Coincidencias a revisar", f"{n_partidas_revisar:,}")
@@ -2138,7 +2189,7 @@ def main():
                 height=min(620, 85 + 35 * len(partidas_pantalla)),
             )
 
-        st.markdown("#### A. Cruces por el mismo folio")
+        st.markdown("#### A. Cruces adicionales entre cuentas por el mismo folio")
         if df_cruces_ref.empty:
             st.info(
                 "No se encontraron folios idénticos con efectos opuestos "
