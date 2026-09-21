@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import unicodedata
+import hashlib
 from copy import copy
 from io import BytesIO
 from pathlib import Path
@@ -15,8 +16,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "4.4 ARPON · HOTEL QUARTZ"
-UMBRAL_TOLERANCIA = 1.0
+APP_VERSION = "5.0 ARPON · HOTEL QUARTZ · CLIENTES + PROVEEDORES"
+# Tolerancia contable en moneda. Se usa para validaciones y conciliaciones.
+# Dos centavos evitan falsos errores binarios de float sin aceptar diferencias materiales.
+UMBRAL_TOLERANCIA = 0.02
 UMBRAL_FOLIO = 0.01
 
 # Prefijos documentales que sí tratamos como folios.
@@ -166,6 +169,146 @@ def es_vacio(valor):
     return pd.isna(valor) or str(valor).strip() == ""
 
 
+
+def detectar_tipo_cuenta(nombre):
+    """Clasifica únicamente las familias soportadas por este auditor."""
+    s = texto_norm(nombre)
+    if "PROVEED" in s:
+        return "PROVEEDORES"
+    if "CLIENT" in s:
+        return "CLIENTES"
+    return "NO_SOPORTADA"
+
+
+def factor_pendiente_tipo(tipo_cuenta):
+    """
+    Convierte el signo ARPON a una magnitud de pendiente homogénea:
+      CLIENTES:    +saldo = por cobrar        -> factor +1
+      PROVEEDORES: -saldo = por pagar         -> factor -1
+    """
+    if tipo_cuenta == "CLIENTES":
+        return 1.0
+    if tipo_cuenta == "PROVEEDORES":
+        return -1.0
+    return np.nan
+
+
+def reconstruir_filas_fragmentadas_arpon(raw, file_name):
+    """
+    Repara de forma conservadora el patrón observado en exportaciones ARPON donde
+    una partida se parte en dos filas:
+
+      fila N:   Póliza | Fecha | Docto. | <vacío> | <vacío> | <vacío> | <vacío>
+      fila N+1: <vacío>| Concepto       | Cargo   | Abono   | Saldo   | <vacío> | <vacío>
+
+    La reparación solo mueve Concepto/Cargo/Abono/Saldo a la fila principal.
+    La fila de continuación NO se elimina, para conservar la numeración original.
+    La validez final queda certificada por los amarres de totales y la secuencia
+    completa de saldo; si no cuadran, el archivo se rechaza posteriormente.
+    """
+    x = raw.copy()
+    reparaciones = []
+    etiquetas_no_concepto = {"TOTALES", "NETO PERIODO", "POLIZA", "FECHA"}
+
+    for i in range(len(x) - 1):
+        r = x.iloc[i]
+        n = x.iloc[i + 1]
+
+        principal = (
+            not es_vacio(r.iloc[0])
+            and pd.notna(parse_spanish_date(r.iloc[1]))
+            and not es_vacio(r.iloc[2])
+            and all(es_vacio(r.iloc[c]) for c in (3, 4, 5, 6))
+        )
+        if not principal:
+            continue
+
+        concepto_sig = texto_norm(n.iloc[1])
+        continuacion = (
+            es_vacio(n.iloc[0])
+            and not es_vacio(n.iloc[1])
+            and pd.isna(parse_spanish_date(n.iloc[1]))
+            and concepto_sig not in etiquetas_no_concepto
+            and not es_vacio(n.iloc[2])
+            and not es_vacio(n.iloc[3])
+            and not es_vacio(n.iloc[4])
+            and es_vacio(n.iloc[5])
+            and es_vacio(n.iloc[6])
+        )
+        if not continuacion:
+            continue
+
+        cargo = parse_amount(n.iloc[2])
+        abono = parse_amount(n.iloc[3])
+        saldo = parse_amount(n.iloc[4])
+        if any(pd.isna(v) for v in (cargo, abono, saldo)):
+            continue
+
+        x.iat[i, 3] = n.iloc[1]
+        x.iat[i, 4] = float(cargo)
+        x.iat[i, 5] = float(abono)
+        x.iat[i, 6] = float(saldo)
+
+        reparaciones.append(
+            {
+                "archivo": file_name,
+                "fila_principal": int(i + 1),
+                "fila_continuacion": int(i + 2),
+                "poliza": str(r.iloc[0]).strip(),
+                "fecha": parse_spanish_date(r.iloc[1]),
+                "referencia": str(r.iloc[2]).strip(),
+                "concepto_reconstruido": str(n.iloc[1]).strip(),
+                "cargo_reconstruido": float(cargo),
+                "abono_reconstruido": float(abono),
+                "saldo_reconstruido": float(saldo),
+                "reparacion_tipo": "FILA_PARTIDA_DESPLAZADA",
+            }
+        )
+
+    return x, pd.DataFrame(reparaciones)
+
+
+def detectar_solapamientos_periodos(resumen):
+    """Detecta dos archivos que cubren días superpuestos de la misma cuenta lógica."""
+    if resumen is None or resumen.empty:
+        return pd.DataFrame()
+
+    cols = [
+        "empresa_uid", "empresa", "meta_codigo", "meta_nombre", "cuenta_logica_uid",
+        "archivo", "periodo_inicio", "periodo_fin",
+    ]
+    b = resumen[cols].drop_duplicates().copy()
+    b["periodo_inicio"] = pd.to_datetime(b["periodo_inicio"], errors="coerce")
+    b["periodo_fin"] = pd.to_datetime(b["periodo_fin"], errors="coerce")
+    b = b[b["periodo_inicio"].notna() & b["periodo_fin"].notna()]
+
+    hallazgos = []
+    for _, g in b.groupby("cuenta_logica_uid"):
+        rows = list(g.to_dict("records"))
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                a, c = rows[i], rows[j]
+                if a["archivo"] == c["archivo"]:
+                    continue
+                ini = max(a["periodo_inicio"], c["periodo_inicio"])
+                fin = min(a["periodo_fin"], c["periodo_fin"])
+                if ini <= fin:
+                    hallazgos.append(
+                        {
+                            "empresa": a["empresa"],
+                            "meta_codigo": a["meta_codigo"],
+                            "meta_nombre": a["meta_nombre"],
+                            "archivo_1": a["archivo"],
+                            "periodo_1": f"{a['periodo_inicio'].date()} → {a['periodo_fin'].date()}",
+                            "archivo_2": c["archivo"],
+                            "periodo_2": f"{c['periodo_inicio'].date()} → {c['periodo_fin'].date()}",
+                            "inicio_solapamiento": ini.date(),
+                            "fin_solapamiento": fin.date(),
+                        }
+                    )
+    return pd.DataFrame(hallazgos)
+
+
 def extraer_numero_folio(ref_norm):
     if not ref_norm:
         return None
@@ -175,23 +318,18 @@ def extraer_numero_folio(ref_norm):
 
 def normalizar_referencia_base(ref):
     """
-    Normaliza SIN destruir prefijos documentales.
+    Normaliza referencias de Clientes y Proveedores sin destruir identificadores.
 
-    Ejemplos:
-      NCTA12846    -> NCTA12846
-      NCTA-13547   -> NCTA13547
-      NCTA 14314   -> NCTA14314
-      NC11404      -> NC11404
-      FACTURA NCTA-13547 -> NCTA13547
-      8729         -> 8729
+    Tipos conciliables:
+      - FOLIO_PREFIJO: H-123, NCTA-123, etc.
+      - FOLIO_NUMERICO: 8729
+      - DOCUMENTO_ALFANUMERICO: 824FEFE3, 0A11DE43, etc.
 
-    Referencias libres se conservan en forma normalizada, pero NO se marcan
-    automáticamente como folios.
+    Referencias descriptivas con espacios permanecen como OTRA_REFERENCIA.
     """
     if es_vacio(ref):
         return None, "VACIA", None
 
-    # Evitar 123.0 cuando Excel leyó un folio numérico como float.
     if isinstance(ref, float) and ref.is_integer():
         s = str(int(ref))
     else:
@@ -207,21 +345,28 @@ def normalizar_referencia_base(ref):
         s,
     )
 
-    # Folio con prefijo conocido.
     prefijos = "|".join(sorted(PREFIJOS_FOLIO, key=len, reverse=True))
     m = re.fullmatch(rf"({prefijos})[\s\-_/.:]*(\d+)", s)
     if m:
         pref, num = m.groups()
         return f"{pref}{num}", "FOLIO_PREFIJO", pref
 
-    # Folio completamente numérico.
     if re.fullmatch(r"\d+", s):
         return s, "FOLIO_NUMERICO", None
 
-    # Referencia libre / bancaria / descriptiva.
+    # IDs documentales frecuentes de proveedores (por ejemplo UUID corto/hex).
+    # Se exige mezcla de letras y números y ausencia de espacios para evitar
+    # convertir descripciones bancarias o conceptos libres en documentos.
+    if (
+        4 <= len(s) <= 40
+        and re.fullmatch(r"[A-Z0-9]+", s)
+        and re.search(r"[A-Z]", s)
+        and re.search(r"\d", s)
+    ):
+        return s, "DOCUMENTO_ALFANUMERICO", None
+
     libre = re.sub(r"\s+", " ", s).strip()
     return libre if libre else None, "OTRA_REFERENCIA", None
-
 
 def extraer_referencia_de_concepto(concepto):
     """
@@ -286,8 +431,10 @@ def enriquecer_referencias(df):
     df["es_folio"] = df["referencia_tipo"].isin(
         ["FOLIO_PREFIJO", "FOLIO_NUMERICO"]
     )
+    df["es_documento_conciliable"] = df["referencia_tipo"].isin(
+        ["FOLIO_PREFIJO", "FOLIO_NUMERICO", "DOCUMENTO_ALFANUMERICO"]
+    )
     return df
-
 
 def cargar_archivo_robusto(file_bytes, file_name):
     """
@@ -456,77 +603,53 @@ def extraer_empresa_periodo_arpon(raw):
 
 def validar_secuencia_saldo(movs, resumen):
     """
-    Valida el saldo acumulado movimiento por movimiento usando las dos
-    naturalezas posibles. Devuelve diagnóstico por cuenta.
+    Valida la ecuación física del auxiliar ARPON movimiento por movimiento:
+
+        saldo_nuevo = saldo_anterior + cargo - abono
+
+    La naturaleza de negocio (Clientes/Proveedores) se interpreta después y no
+    altera esta validación de la fuente.
     """
     resultados = []
     mapa_si = resumen.set_index("cuenta_uid")["saldo_inicial"]
+    mapa_sf = resumen.set_index("cuenta_uid")["saldo_final_aux"]
 
     for cuenta_uid, mm in movs.groupby("cuenta_uid"):
         mm = mm.sort_values("fila_origen").copy()
         saldo_ini = float(mapa_si.loc[cuenta_uid])
+        saldo_final_reporte = float(mapa_sf.loc[cuenta_uid])
 
         prev = mm["saldo_acumulado"].shift(1)
         prev.iloc[0] = saldo_ini
+        esperado = prev + mm["cargos"] - mm["abonos"]
+        errores = (mm["saldo_acumulado"] - esperado).abs()
 
-        esperado_deud = prev + mm["cargos"] - mm["abonos"]
-        esperado_acre = prev - mm["cargos"] + mm["abonos"]
-        err_deud = (mm["saldo_acumulado"] - esperado_deud).abs()
-        err_acre = (mm["saldo_acumulado"] - esperado_acre).abs()
-
-        max_deud = float(err_deud.max()) if len(err_deud) else 0.0
-        max_acre = float(err_acre.max()) if len(err_acre) else 0.0
-
-        if max_deud <= UMBRAL_TOLERANCIA and max_acre > UMBRAL_TOLERANCIA:
-            nat = "DEUDORA"
-            err_elegido = err_deud
-        elif max_acre <= UMBRAL_TOLERANCIA and max_deud > UMBRAL_TOLERANCIA:
-            nat = "ACREEDORA"
-            err_elegido = err_acre
-        elif max_deud <= UMBRAL_TOLERANCIA and max_acre <= UMBRAL_TOLERANCIA:
-            nat = "INDETERMINADA"
-            err_elegido = pd.concat([err_deud, err_acre], axis=1).min(axis=1)
-        elif max_deud < max_acre:
-            nat = "DEUDORA"
-            err_elegido = err_deud
-        else:
-            nat = "ACREEDORA"
-            err_elegido = err_acre
+        ultimo = float(mm.iloc[-1]["saldo_acumulado"]) if len(mm) else saldo_ini
+        error_final = abs(ultimo - saldo_final_reporte)
 
         resultados.append(
             {
                 "cuenta_uid": cuenta_uid,
-                "naturaleza_secuencia": nat,
-                "n_errores_saldo_secuencia": int(
-                    (err_elegido > UMBRAL_TOLERANCIA).sum()
-                ),
-                "max_error_saldo_secuencia": float(err_elegido.max()),
-                "max_error_deudora_secuencia": max_deud,
-                "max_error_acreedora_secuencia": max_acre,
-                "ultimo_saldo_movimiento": float(mm.iloc[-1]["saldo_acumulado"]),
+                "ecuacion_saldo_fuente": "SALDO_ANTERIOR + CARGO - ABONO",
+                "n_errores_saldo_secuencia": int((errores > UMBRAL_TOLERANCIA).sum()),
+                "max_error_saldo_secuencia": float(errores.max()) if len(errores) else 0.0,
+                "ultimo_saldo_movimiento": ultimo,
+                "error_ultimo_saldo_vs_total": float(error_final),
             }
         )
 
     return pd.DataFrame(resultados)
 
-
 def procesar_formato_arpon(raw, file_name):
-    """
-    Procesa el Auxiliar de Cuentas de ARPON usado por Hotel Quartz:
-      Cuenta: código - nombre                                  saldo inicial
-      Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo
-      ...
-             Totales                         cargos | abonos | saldo final
-             Neto Periodo                           | neto
-    """
+    """Procesa auxiliares ARPON de CLIENTES y PROVEEDORES de Hotel Quartz."""
     if raw.shape[1] < 7:
         raise ValueError(
             f"{file_name}: el auxiliar ARPON requiere al menos 7 columnas."
         )
 
+    raw, reparaciones = reconstruir_filas_fragmentadas_arpon(raw, file_name)
     empresa, periodo_inicio, periodo_fin = extraer_empresa_periodo_arpon(raw)
 
-    # Encabezados de cuenta.
     patron_header = re.compile(
         r"^CUENTA:\s*(\d+(?:-\d+){2,})\s*-\s*(.+)$",
         flags=re.I,
@@ -543,11 +666,19 @@ def procesar_formato_arpon(raw, file_name):
                 f"{file_name}: no pude leer el saldo inicial de la cuenta "
                 f"{m.group(1)} en la fila Excel {idx + 1}."
             )
+        nombre = m.group(2).strip()
+        tipo_cuenta = detectar_tipo_cuenta(nombre)
+        if tipo_cuenta == "NO_SOPORTADA":
+            raise ValueError(
+                f"{file_name}: la cuenta {m.group(1)} - {nombre} no es CLIENTES ni "
+                "PROVEEDORES. Esta versión certifica únicamente esas dos familias."
+            )
         headers.append(
             {
                 "idx": idx,
                 "codigo": m.group(1),
-                "nombre": m.group(2).strip(),
+                "nombre": nombre,
+                "tipo_cuenta": tipo_cuenta,
                 "saldo_inicial": float(saldo_ini),
             }
         )
@@ -560,18 +691,18 @@ def procesar_formato_arpon(raw, file_name):
     df = raw.copy()
     df["meta_codigo"] = pd.Series(index=df.index, dtype="object")
     df["meta_nombre"] = pd.Series(index=df.index, dtype="object")
+    df["meta_tipo_cuenta"] = pd.Series(index=df.index, dtype="object")
     df["meta_saldo_inicial"] = pd.Series(index=df.index, dtype="float64")
 
     for h in headers:
         df.loc[h["idx"], "meta_codigo"] = h["codigo"]
         df.loc[h["idx"], "meta_nombre"] = h["nombre"]
+        df.loc[h["idx"], "meta_tipo_cuenta"] = h["tipo_cuenta"]
         df.loc[h["idx"], "meta_saldo_inicial"] = h["saldo_inicial"]
 
-    df["meta_codigo"] = df["meta_codigo"].ffill()
-    df["meta_nombre"] = df["meta_nombre"].ffill()
-    df["meta_saldo_inicial"] = df["meta_saldo_inicial"].ffill()
+    for c in ["meta_codigo", "meta_nombre", "meta_tipo_cuenta", "meta_saldo_inicial"]:
+        df[c] = df[c].ffill()
 
-    # Movimiento = fecha válida en columna B + póliza en A + cuenta ya activa.
     fechas_candidato = raw[1].apply(parse_spanish_date)
     etiquetas_b = raw[1].apply(texto_norm)
     is_mov = (
@@ -584,16 +715,10 @@ def procesar_formato_arpon(raw, file_name):
     if not is_mov.any():
         raise ValueError(f"{file_name}: no se detectaron movimientos válidos.")
 
-    movs = df[is_mov].copy()
-    movs = movs.rename(
+    movs = df[is_mov].copy().rename(
         columns={
-            0: "poliza",
-            1: "fecha_raw",
-            2: "referencia",
-            3: "concepto",
-            4: "cargos",
-            5: "abonos",
-            6: "saldo_acumulado",
+            0: "poliza", 1: "fecha_raw", 2: "referencia", 3: "concepto",
+            4: "cargos", 5: "abonos", 6: "saldo_acumulado",
         }
     )
     movs["tipo_poliza"] = (
@@ -604,6 +729,7 @@ def procesar_formato_arpon(raw, file_name):
     movs["archivo"] = file_name
     movs["periodo_inicio"] = periodo_inicio
     movs["periodo_fin"] = periodo_fin
+    movs["tipo_cuenta"] = movs["meta_tipo_cuenta"]
     movs = agregar_identidad_origen(movs, "ARPON", empresa or "", file_name)
     movs["fecha"] = movs["fecha_raw"].apply(parse_spanish_date)
 
@@ -616,142 +742,133 @@ def procesar_formato_arpon(raw, file_name):
             ejemplos = original[invalidos].astype(str).head(5).tolist()
             raise ValueError(
                 f"{file_name}: valores no numéricos en '{c}' en "
-                f"{len(filas)} movimiento(s). Filas {filas[:10]}; "
-                f"ejemplos: {ejemplos}."
+                f"{len(filas)} movimiento(s). Filas {filas[:10]}; ejemplos: {ejemplos}."
             )
         movs[c] = convertido.astype(float)
+
+    # Trazabilidad de las filas reconstruidas.
+    if reparaciones.empty:
+        movs["fila_reparada"] = False
+        movs["fila_continuacion"] = np.nan
+        movs["reparacion_tipo"] = ""
+    else:
+        mapa_cont = reparaciones.set_index("fila_principal")["fila_continuacion"].to_dict()
+        mapa_tipo = reparaciones.set_index("fila_principal")["reparacion_tipo"].to_dict()
+        movs["fila_reparada"] = movs["fila_origen"].isin(mapa_cont)
+        movs["fila_continuacion"] = movs["fila_origen"].map(mapa_cont)
+        movs["reparacion_tipo"] = movs["fila_origen"].map(mapa_tipo).fillna("")
 
     movs["concepto_norm"] = movs["concepto"].apply(concepto_norm)
     movs = enriquecer_referencias(movs)
 
-    # Resumen base por cuenta a partir del detalle.
     resumen_rows = []
+    empresa_uid = construir_empresa_uid("ARPON", empresa or "")
     for h in headers:
-        uid = f"{construir_empresa_uid('ARPON', empresa or '')}::{file_name}::{h['codigo']}"
+        uid = f"{empresa_uid}::{file_name}::{h['codigo']}"
         mm = movs[movs["cuenta_uid"] == uid].sort_values("fila_origen")
-        if mm.empty:
-            total_cargos = 0.0
-            total_abonos = 0.0
-            saldo_final = h["saldo_inicial"]
-        else:
-            total_cargos = float(mm["cargos"].sum())
-            total_abonos = float(mm["abonos"].sum())
-            saldo_final = float(mm.iloc[-1]["saldo_acumulado"])
-
+        total_cargos = float(mm["cargos"].sum()) if len(mm) else 0.0
+        total_abonos = float(mm["abonos"].sum()) if len(mm) else 0.0
+        saldo_final = float(mm.iloc[-1]["saldo_acumulado"]) if len(mm) else h["saldo_inicial"]
         resumen_rows.append(
             {
                 "archivo": file_name,
                 "sistema_origen": "ARPON",
                 "empresa": empresa or "",
-                "empresa_uid": construir_empresa_uid("ARPON", empresa or ""),
-                "cuenta_logica_uid": f"{construir_empresa_uid('ARPON', empresa or '')}::{h['codigo']}",
+                "empresa_uid": empresa_uid,
+                "cuenta_logica_uid": f"{empresa_uid}::{h['codigo']}",
                 "periodo_inicio": periodo_inicio,
                 "periodo_fin": periodo_fin,
                 "cuenta_uid": uid,
                 "meta_codigo": h["codigo"],
                 "meta_nombre": h["nombre"],
+                "tipo_cuenta": h["tipo_cuenta"],
                 "saldo_inicial": h["saldo_inicial"],
                 "total_cargos": total_cargos,
                 "total_abonos": total_abonos,
                 "saldo_final_aux": saldo_final,
+                "total_explicito_arpon": False,
+            }
+        )
+    resumen = pd.DataFrame(resumen_rows)
+
+    # Totales explícitos del reporte, asociados a la cuenta activa por ffill.
+    mask_totales = raw[1].apply(texto_norm).eq("TOTALES")
+    total_rows = raw.index[mask_totales].tolist()
+    explicitos = []
+    for idx in total_rows:
+        codigo = df.loc[idx, "meta_codigo"]
+        if pd.isna(codigo):
+            continue
+        tc, ta, sf = (parse_amount(raw.iloc[idx, c]) for c in (4, 5, 6))
+        if any(pd.isna(v) for v in (tc, ta, sf)):
+            raise ValueError(
+                f"{file_name}: no fue posible leer la fila Totales (fila Excel {idx + 1})."
+            )
+        explicitos.append(
+            {
+                "meta_codigo": str(codigo),
+                "total_cargos_exp": float(tc),
+                "total_abonos_exp": float(ta),
+                "saldo_final_exp": float(sf),
             }
         )
 
-    resumen = pd.DataFrame(resumen_rows)
+    if explicitos:
+        exp = pd.DataFrame(explicitos).drop_duplicates("meta_codigo", keep="last")
+        resumen = resumen.merge(exp, on="meta_codigo", how="left")
+        tiene_exp = resumen["saldo_final_exp"].notna()
+        resumen.loc[tiene_exp, "total_cargos"] = resumen.loc[tiene_exp, "total_cargos_exp"]
+        resumen.loc[tiene_exp, "total_abonos"] = resumen.loc[tiene_exp, "total_abonos_exp"]
+        resumen.loc[tiene_exp, "saldo_final_aux"] = resumen.loc[tiene_exp, "saldo_final_exp"]
+        resumen.loc[tiene_exp, "total_explicito_arpon"] = True
+        resumen = resumen.drop(
+            columns=["total_cargos_exp", "total_abonos_exp", "saldo_final_exp"]
+        )
 
-    # Totales explícitos del reporte.
-    mask_totales = raw[1].apply(texto_norm).eq("TOTALES")
-    total_rows = raw.index[mask_totales].tolist()
-    n_totales = len(total_rows)
-    gran_total = None
-    amarre_totales = None
-
-    if n_totales:
-        # Si hay exactamente un total y una cuenta, úsalo como total certificado.
-        if n_totales == 1 and len(resumen) == 1:
-            idx = total_rows[0]
-            tc = parse_amount(raw.iloc[idx, 4])
-            ta = parse_amount(raw.iloc[idx, 5])
-            sf = parse_amount(raw.iloc[idx, 6])
-            if any(pd.isna(x) for x in [tc, ta, sf]):
-                raise ValueError(
-                    f"{file_name}: no fue posible leer la fila Totales "
-                    f"(fila Excel {idx + 1})."
-                )
-            resumen.loc[0, "total_cargos"] = float(tc)
-            resumen.loc[0, "total_abonos"] = float(ta)
-            resumen.loc[0, "saldo_final_aux"] = float(sf)
-            gran_total = float(sf)
-            amarre_totales = (
-                abs(float(tc) - float(movs["cargos"].sum())) <= UMBRAL_TOLERANCIA
-                and abs(float(ta) - float(movs["abonos"].sum())) <= UMBRAL_TOLERANCIA
-            )
-        elif n_totales == len(resumen):
-            # Posible total por cada cuenta: la cuenta activa se obtiene por ffill.
-            explicitos = []
-            for idx in total_rows:
-                codigo = df.loc[idx, "meta_codigo"]
-                if pd.isna(codigo):
-                    continue
-                explicitos.append(
-                    {
-                        "meta_codigo": str(codigo),
-                        "total_cargos_exp": parse_amount(raw.iloc[idx, 4]),
-                        "total_abonos_exp": parse_amount(raw.iloc[idx, 5]),
-                        "saldo_final_exp": parse_amount(raw.iloc[idx, 6]),
-                    }
-                )
-            exp = pd.DataFrame(explicitos)
-            if len(exp) == len(resumen) and exp["meta_codigo"].nunique() == len(resumen):
-                resumen = resumen.merge(exp, on="meta_codigo", how="left")
-                for dst, src in [
-                    ("total_cargos", "total_cargos_exp"),
-                    ("total_abonos", "total_abonos_exp"),
-                    ("saldo_final_aux", "saldo_final_exp"),
-                ]:
-                    resumen[dst] = resumen[src].astype(float)
-                resumen = resumen.drop(
-                    columns=["total_cargos_exp", "total_abonos_exp", "saldo_final_exp"]
-                )
-                gran_total = float(resumen["saldo_final_aux"].sum())
-                amarre_totales = True
-
-    # Comparar detalle contra los totales de cada cuenta.
     sum_mov = (
         movs.groupby("cuenta_uid", as_index=False)
         .agg(mov_cargos=("cargos", "sum"), mov_abonos=("abonos", "sum"))
     )
     resumen = resumen.merge(sum_mov, on="cuenta_uid", how="left")
-    resumen[["mov_cargos", "mov_abonos"]] = resumen[
-        ["mov_cargos", "mov_abonos"]
-    ].fillna(0.0)
+    resumen[["mov_cargos", "mov_abonos"]] = resumen[["mov_cargos", "mov_abonos"]].fillna(0.0)
     resumen["dif_cargos_vs_total"] = resumen["total_cargos"] - resumen["mov_cargos"]
     resumen["dif_abonos_vs_total"] = resumen["total_abonos"] - resumen["mov_abonos"]
 
+    # Solo una fila Totales explícita constituye una validación independiente.
     mal_detalle = resumen[
-        (resumen["dif_cargos_vs_total"].abs() > UMBRAL_TOLERANCIA)
-        | (resumen["dif_abonos_vs_total"].abs() > UMBRAL_TOLERANCIA)
+        resumen["total_explicito_arpon"]
+        & (
+            (resumen["dif_cargos_vs_total"].abs() > UMBRAL_TOLERANCIA)
+            | (resumen["dif_abonos_vs_total"].abs() > UMBRAL_TOLERANCIA)
+        )
     ]
     if not mal_detalle.empty:
+        detalle = "; ".join(
+            f"{r.meta_codigo}: Δcargo={r.dif_cargos_vs_total:,.2f}, "
+            f"Δabono={r.dif_abonos_vs_total:,.2f}"
+            for r in mal_detalle.itertuples()
+        )
         raise ValueError(
-            f"{file_name}: el detalle no amarra con la fila Totales del "
-            "auxiliar ARPON."
+            f"{file_name}: el detalle no amarra con la fila Totales del auxiliar ARPON. {detalle}"
         )
 
-    # Validación independiente: secuencia completa del saldo acumulado.
     sec = validar_secuencia_saldo(movs, resumen)
     resumen = resumen.merge(sec, on="cuenta_uid", how="left")
     errores_secuencia = int(resumen["n_errores_saldo_secuencia"].fillna(0).sum())
-    max_error_secuencia = float(
-        resumen["max_error_saldo_secuencia"].fillna(0).max()
-    )
+    max_error_secuencia = float(resumen["max_error_saldo_secuencia"].fillna(0).max())
+    error_final_max = float(resumen["error_ultimo_saldo_vs_total"].fillna(0).max())
+
     if errores_secuencia:
         raise ValueError(
-            f"{file_name}: se detectaron {errores_secuencia} movimiento(s) cuya "
-            "secuencia de saldo acumulado no puede reproducirse con cargos/abonos."
+            f"{file_name}: se detectaron {errores_secuencia} movimiento(s) cuya secuencia "
+            "de saldo acumulado no puede reproducirse con SALDO + CARGO - ABONO."
+        )
+    if error_final_max > UMBRAL_TOLERANCIA:
+        raise ValueError(
+            f"{file_name}: el último saldo de movimientos no coincide con el saldo final "
+            f"ARPON. Diferencia máxima: ${error_final_max:,.2f}."
         )
 
-    # Neto del periodo, si está impreso.
     mask_neto = raw[1].apply(texto_norm).eq("NETO PERIODO")
     neto_periodo = None
     amarre_neto = None
@@ -769,26 +886,45 @@ def procesar_formato_arpon(raw, file_name):
             neto_calc = float(movs["cargos"].sum() - movs["abonos"].sum())
             amarre_neto = abs(abs(neto_calc) - abs(neto_periodo)) <= UMBRAL_TOLERANCIA
 
-    if gran_total is None:
-        gran_total = float(resumen["saldo_final_aux"].sum())
-
-    suma_saldos = float(resumen["saldo_final_aux"].sum())
-    amarre_gran_total = abs(suma_saldos - gran_total) <= max(
-        UMBRAL_TOLERANCIA, abs(gran_total) * 1e-6
+    todos_totales_exp = bool(len(resumen) and resumen["total_explicito_arpon"].all())
+    gran_total_reportado = (
+        float(resumen["saldo_final_aux"].sum()) if todos_totales_exp else None
+    )
+    gran_total_calculado = float(
+        movs.groupby("cuenta_uid")["saldo_acumulado"].last().sum()
+    )
+    amarre_gran_total = (
+        abs(gran_total_reportado - gran_total_calculado) <= UMBRAL_TOLERANCIA
+        if gran_total_reportado is not None else None
+    )
+    amarre_totales = (
+        bool(
+            (
+                (resumen.loc[resumen["total_explicito_arpon"], "dif_cargos_vs_total"].abs() <= UMBRAL_TOLERANCIA)
+                & (resumen.loc[resumen["total_explicito_arpon"], "dif_abonos_vs_total"].abs() <= UMBRAL_TOLERANCIA)
+            ).all()
+        )
+        if resumen["total_explicito_arpon"].any() else None
     )
 
+    tipos = sorted(resumen["tipo_cuenta"].dropna().unique())
     diag = {
         "archivo": file_name,
         "sistema_origen": "ARPON",
         "formato": "ARPON_AUXILIAR_CUENTAS",
         "empresa": empresa or "",
+        "tipo_cuenta": " | ".join(tipos),
         "periodo_inicio": periodo_inicio,
         "periodo_fin": periodo_fin,
         "n_headers": len(headers),
-        "n_totales": n_totales,
+        "n_totales": len(total_rows),
         "n_movs": int(len(movs)),
-        "gran_total": gran_total,
-        "suma_saldos_cuenta": suma_saldos,
+        "n_filas_reconstruidas": int(len(reparaciones)),
+        "gran_total_reportado": gran_total_reportado,
+        "gran_total_calculado": gran_total_calculado,
+        "gran_total": gran_total_reportado if gran_total_reportado is not None else gran_total_calculado,
+        "origen_gran_total": "ARPON" if gran_total_reportado is not None else "CALCULADO",
+        "suma_saldos_cuenta": float(resumen["saldo_final_aux"].sum()),
         "n_candidatos_no_header": 0,
         "amarre_gran_total": amarre_gran_total,
         "amarre_totales_detalle": amarre_totales,
@@ -796,10 +932,10 @@ def procesar_formato_arpon(raw, file_name):
         "amarre_neto_periodo": amarre_neto,
         "n_errores_saldo_secuencia": errores_secuencia,
         "max_error_saldo_secuencia": max_error_secuencia,
+        "max_error_ultimo_saldo_vs_total": error_final_max,
     }
 
     return movs.reset_index(drop=True), resumen.reset_index(drop=True), diag
-
 
 def procesar_archivo_core(file_bytes, file_name):
     raw = cargar_archivo_robusto(file_bytes, file_name)
@@ -817,239 +953,89 @@ def procesar_archivo_engine(file_bytes, file_name):
 
 def detectar_naturaleza(resumen, movs):
     """
-    Detecta naturaleza por cuenta comparando las dos ecuaciones posibles
-    contra el saldo final reportado por ARPON.
+    Separa dos conceptos que no deben confundirse:
+      1) La ecuación física ARPON siempre es saldo + cargo - abono.
+      2) La naturaleza de negocio depende de la familia de cuenta.
 
-    Deudora:
-      final = inicial + cargos - abonos
-
-    Acreedora:
-      final = inicial - cargos + abonos
-
-    También usa el comportamiento del saldo acumulado como evidencia secundaria.
+    CLIENTES    -> naturaleza DEUDORA, factor de pendiente +1.
+    PROVEEDORES -> naturaleza ACREEDORA, factor de pendiente -1.
     """
     r = resumen.copy()
+    r["esperado_arpon"] = r["saldo_inicial"] + r["total_cargos"] - r["total_abonos"]
+    r["error_arpon"] = r["saldo_final_aux"] - r["esperado_arpon"]
 
-    r["esperado_deudora"] = (
-        r["saldo_inicial"] + r["total_cargos"] - r["total_abonos"]
+    r["naturaleza"] = r["tipo_cuenta"].map(
+        {"CLIENTES": "DEUDORA", "PROVEEDORES": "ACREEDORA"}
+    ).fillna("INDETERMINADA")
+    r["naturaleza_confianza"] = np.where(
+        r["naturaleza"].eq("INDETERMINADA"), "BAJA", "ALTA"
     )
-    r["esperado_acreedora"] = (
-        r["saldo_inicial"] - r["total_cargos"] + r["total_abonos"]
-    )
-    r["error_deudora"] = r["saldo_final_aux"] - r["esperado_deudora"]
-    r["error_acreedora"] = r["saldo_final_aux"] - r["esperado_acreedora"]
-
-    naturalezas = []
-    confianzas = []
-
-    for _, row in r.iterrows():
-        ed = abs(row["error_deudora"])
-        ea = abs(row["error_acreedora"])
-
-        deud_cuadra = ed <= UMBRAL_TOLERANCIA
-        acre_cuadra = ea <= UMBRAL_TOLERANCIA
-
-        if deud_cuadra and not acre_cuadra:
-            naturaleza = "DEUDORA"
-            confianza = "ALTA"
-        elif acre_cuadra and not deud_cuadra:
-            naturaleza = "ACREEDORA"
-            confianza = "ALTA"
-        elif deud_cuadra and acre_cuadra:
-            # Puede ocurrir si cargos == abonos. Revisamos el saldo acumulado.
-            mm = movs[movs["cuenta_uid"] == row["cuenta_uid"]].copy()
-            if len(mm):
-                mm = mm.sort_values("fila_origen")
-                saldo_previo = mm["saldo_acumulado"].shift(1)
-                saldo_previo.iloc[0] = row["saldo_inicial"]
-                delta_obs = mm["saldo_acumulado"] - saldo_previo
-
-                err_mov_deud = (
-                    delta_obs - (mm["cargos"] - mm["abonos"])
-                ).abs().sum()
-                err_mov_acre = (
-                    delta_obs - (mm["abonos"] - mm["cargos"])
-                ).abs().sum()
-
-                if err_mov_deud + 0.01 < err_mov_acre:
-                    naturaleza = "DEUDORA"
-                    confianza = "ALTA"
-                elif err_mov_acre + 0.01 < err_mov_deud:
-                    naturaleza = "ACREEDORA"
-                    confianza = "ALTA"
-                else:
-                    naturaleza = "INDETERMINADA"
-                    confianza = "BAJA"
-            else:
-                naturaleza = "INDETERMINADA"
-                confianza = "BAJA"
-        else:
-            # Ninguna ecuación cuadra. Elegimos solo si una es claramente mejor;
-            # de cualquier forma la confianza será baja y quedará hallazgo.
-            if ed < ea * 0.25:
-                naturaleza = "DEUDORA"
-                confianza = "BAJA"
-            elif ea < ed * 0.25:
-                naturaleza = "ACREEDORA"
-                confianza = "BAJA"
-            else:
-                naturaleza = "INDETERMINADA"
-                confianza = "BAJA"
-
-        naturalezas.append(naturaleza)
-        confianzas.append(confianza)
-
-    r["naturaleza"] = naturalezas
-    r["naturaleza_confianza"] = confianzas
+    r["factor_pendiente"] = r["tipo_cuenta"].apply(factor_pendiente_tipo)
+    r["saldo_inicial_pendiente"] = r["saldo_inicial"] * r["factor_pendiente"]
+    r["saldo_final_pendiente"] = r["saldo_final_aux"] * r["factor_pendiente"]
     return r
-
 
 def aplicar_naturaleza_a_movimientos(movs, resumen_naturaleza):
     m = movs.copy()
-    # Identificador estable dentro de la ejecución. Permite regresar desde los
-    # grupos de conciliación hasta la fila exacta del auxiliar de origen.
     m["movimiento_id"] = np.arange(1, len(m) + 1)
-    mapa_nat = resumen_naturaleza.set_index("cuenta_uid")["naturaleza"]
-    m["naturaleza"] = m["cuenta_uid"].map(mapa_nat)
+    mapa = resumen_naturaleza.set_index("cuenta_uid")
+    m["naturaleza"] = m["cuenta_uid"].map(mapa["naturaleza"])
+    m["factor_pendiente"] = m["cuenta_uid"].map(mapa["factor_pendiente"])
 
-    m["efecto_natural"] = np.select(
-        [
-            m["naturaleza"].eq("DEUDORA"),
-            m["naturaleza"].eq("ACREEDORA"),
-        ],
-        [
-            m["cargos"] - m["abonos"],
-            m["abonos"] - m["cargos"],
-        ],
-        default=np.nan,
-    )
-
+    # Cambio físico en ARPON y cambio normalizado del saldo pendiente.
+    m["efecto_arpon"] = m["cargos"] - m["abonos"]
+    m["efecto_natural"] = m["efecto_arpon"] * m["factor_pendiente"]
+    m["saldo_pendiente"] = m["saldo_acumulado"] * m["factor_pendiente"]
     m["importe_abs"] = m["efecto_natural"].abs().round(2)
     return m
-
 
 def marcar_duplicados_exactos(movs):
     m = movs.copy()
     subset = [
-        "cuenta_uid", "fecha", "tipo_poliza", "poliza", "concepto_norm",
+        "cuenta_logica_uid", "fecha", "tipo_poliza", "poliza", "concepto_norm",
         "referencia_norm", "cargos", "abonos"
     ]
-    m["posible_duplicado_exacto"] = m.duplicated(
-        subset=subset, keep=False
-    )
+    m["posible_duplicado_exacto"] = m.duplicated(subset=subset, keep=False)
     return m
 
-
 def analizar_saldos(movs, resumen_naturaleza):
-    """
-    Conciliación por naturaleza:
-
-      saldo_final =
-          saldo_inicial
-        + efecto natural de movimientos CON referencia
-        + efecto natural de movimientos SIN referencia
-        + descuadre_origen
-
-    Los hallazgos son independientes; el estado es solo una prioridad visual.
-    """
+    """Conciliación por saldo pendiente normalizado para Clientes y Proveedores."""
     m = movs.copy()
     r = resumen_naturaleza.copy()
 
-    con_ref = (
-        m[m["tiene_referencia"]]
-        .groupby("cuenta_uid")["efecto_natural"]
-        .sum(min_count=1)
-    )
-    sin_ref = (
-        m[~m["tiene_referencia"]]
-        .groupby("cuenta_uid")["efecto_natural"]
-        .sum(min_count=1)
-    )
+    con_ref = m[m["tiene_referencia"]].groupby("cuenta_uid")["efecto_natural"].sum(min_count=1)
+    sin_ref = m[~m["tiene_referencia"]].groupby("cuenta_uid")["efecto_natural"].sum(min_count=1)
 
     sin_ref_stats = (
-        m[~m["tiene_referencia"]]
-        .groupby("cuenta_uid")
-        .agg(
+        m[~m["tiene_referencia"]].groupby("cuenta_uid").agg(
             n_sin_referencia=("cuenta_uid", "size"),
             cargos_sin_referencia=("cargos", "sum"),
             abonos_sin_referencia=("abonos", "sum"),
         )
     )
-
-    rec_stats = (
-        m[m["referencia_recuperada"]]
-        .groupby("cuenta_uid")
-        .size()
-        .rename("n_refs_recuperadas")
-    )
-
-    otras_ref_stats = (
-        m[m["referencia_tipo"].eq("OTRA_REFERENCIA")]
-        .groupby("cuenta_uid")
-        .size()
-        .rename("n_referencias_libres")
-    )
-
-    neg_stats = (
-        m[(m["cargos"] < 0) | (m["abonos"] < 0)]
-        .groupby("cuenta_uid")
-        .size()
-        .rename("n_montos_negativos")
-    )
-
-    dup_stats = (
-        m[m["posible_duplicado_exacto"]]
-        .groupby("cuenta_uid")
-        .size()
-        .rename("n_filas_posible_duplicado")
-    )
+    rec_stats = m[m["referencia_recuperada"]].groupby("cuenta_uid").size().rename("n_refs_recuperadas")
+    otras_ref_stats = m[m["referencia_tipo"].eq("OTRA_REFERENCIA")].groupby("cuenta_uid").size().rename("n_referencias_libres")
+    neg_stats = m[(m["cargos"] < 0) | (m["abonos"] < 0)].groupby("cuenta_uid").size().rename("n_montos_negativos")
+    dup_stats = m[m["posible_duplicado_exacto"]].groupby("cuenta_uid").size().rename("n_filas_posible_duplicado")
+    repar_stats = m[m["fila_reparada"]].groupby("cuenta_uid").size().rename("n_filas_reconstruidas")
 
     r["movs_con_referencia"] = r["cuenta_uid"].map(con_ref).fillna(0.0)
     r["movs_sin_referencia"] = r["cuenta_uid"].map(sin_ref).fillna(0.0)
-
-    r = r.merge(
-        sin_ref_stats,
-        left_on="cuenta_uid",
-        right_index=True,
-        how="left",
-    )
-    for c in [
-        "n_sin_referencia", "cargos_sin_referencia",
-        "abonos_sin_referencia"
-    ]:
+    r = r.merge(sin_ref_stats, left_on="cuenta_uid", right_index=True, how="left")
+    for c in ["n_sin_referencia", "cargos_sin_referencia", "abonos_sin_referencia"]:
         r[c] = r[c].fillna(0)
 
-    r["importe_bruto_sin_referencia"] = (
-        r["cargos_sin_referencia"].abs()
-        + r["abonos_sin_referencia"].abs()
-    )
-
+    r["importe_bruto_sin_referencia"] = r["cargos_sin_referencia"].abs() + r["abonos_sin_referencia"].abs()
     r["n_refs_recuperadas"] = r["cuenta_uid"].map(rec_stats).fillna(0).astype(int)
-    r["n_referencias_libres"] = (
-        r["cuenta_uid"].map(otras_ref_stats).fillna(0).astype(int)
-    )
-    r["n_montos_negativos"] = (
-        r["cuenta_uid"].map(neg_stats).fillna(0).astype(int)
-    )
-    r["n_filas_posible_duplicado"] = (
-        r["cuenta_uid"].map(dup_stats).fillna(0).astype(int)
-    )
+    r["n_referencias_libres"] = r["cuenta_uid"].map(otras_ref_stats).fillna(0).astype(int)
+    r["n_montos_negativos"] = r["cuenta_uid"].map(neg_stats).fillna(0).astype(int)
+    r["n_filas_posible_duplicado"] = r["cuenta_uid"].map(dup_stats).fillna(0).astype(int)
+    r["n_filas_reconstruidas"] = r["cuenta_uid"].map(repar_stats).fillna(0).astype(int)
 
-    r["saldo_esperado_motor"] = (
-        r["saldo_inicial"]
-        + r["movs_con_referencia"]
-        + r["movs_sin_referencia"]
-    )
-    r["descuadre_origen"] = (
-        r["saldo_final_aux"] - r["saldo_esperado_motor"]
-    )
-
-    r["cuadra"] = (
-        r["descuadre_origen"].abs() <= UMBRAL_TOLERANCIA
-    )
-    r["tiene_arrastre"] = (
-        r["saldo_inicial"].abs() > UMBRAL_TOLERANCIA
-    )
+    r["saldo_esperado_motor"] = r["saldo_inicial_pendiente"] + r["movs_con_referencia"] + r["movs_sin_referencia"]
+    r["descuadre_origen"] = r["saldo_final_pendiente"] - r["saldo_esperado_motor"]
+    r["cuadra"] = r["descuadre_origen"].abs() <= UMBRAL_TOLERANCIA
+    r["tiene_arrastre"] = r["saldo_inicial_pendiente"].abs() > UMBRAL_TOLERANCIA
     r["tiene_sin_referencia"] = r["n_sin_referencia"] > 0
     r["tiene_montos_negativos"] = r["n_montos_negativos"] > 0
 
@@ -1067,29 +1053,24 @@ def analizar_saldos(movs, resumen_naturaleza):
     r["estado"] = r.apply(estado, axis=1)
     return r
 
-
 # ==============================================================================
 # 4. FOLIOS, REFERENCIAS Y CRUCES ARPON
 # ==============================================================================
 
 def analizar_folios(movs, fecha_corte):
-    """
-    Analiza solo referencias que parecen folio documental.
-    La antigüedad es desde la PRIMERA fecha observada, NO fecha de vencimiento.
-    """
+    """Analiza documentos conciliables abiertos a través de todos los periodos cargados."""
     mv = movs[
-        movs["es_folio"]
+        movs["es_documento_conciliable"]
         & movs["efecto_natural"].notna()
     ].copy()
 
     if mv.empty:
         return pd.DataFrame(
             columns=[
-                "sistema_origen", "empresa", "archivo", "meta_codigo",
-                "meta_nombre", "naturaleza", "referencia_norm",
-                "primera_fecha", "ultima_fecha", "n_movs",
-                "cargos", "abonos", "saldo_natural", "dias",
-                "antiguedad_observada", "tipo_saldo",
+                "sistema_origen", "empresa", "tipo_cuenta", "archivo", "archivos",
+                "meta_codigo", "meta_nombre", "naturaleza", "referencia_norm",
+                "primera_fecha", "ultima_fecha", "n_movs", "cargos", "abonos",
+                "saldo_natural", "dias", "antiguedad_observada", "tipo_saldo",
                 "multiples_movimientos", "posible_duplicado_exacto"
             ]
         )
@@ -1097,8 +1078,8 @@ def analizar_folios(movs, fecha_corte):
     g = (
         mv.groupby(
             [
-                "sistema_origen", "empresa_uid", "empresa", "archivo",
-                "cuenta_uid", "cuenta_logica_uid", "meta_codigo", "meta_nombre",
+                "sistema_origen", "empresa_uid", "empresa", "tipo_cuenta",
+                "cuenta_logica_uid", "meta_codigo", "meta_nombre",
                 "naturaleza", "referencia_norm"
             ],
             as_index=False,
@@ -1110,85 +1091,64 @@ def analizar_folios(movs, fecha_corte):
             cargos=("cargos", "sum"),
             abonos=("abonos", "sum"),
             saldo_natural=("efecto_natural", "sum"),
-            posible_duplicado_exacto=(
-                "posible_duplicado_exacto", "max"
-            ),
+            posible_duplicado_exacto=("posible_duplicado_exacto", "max"),
+            archivos=("archivo", lambda x: " | ".join(sorted(set(map(str, x))))),
         )
     )
+    g["archivo"] = g["archivos"]
 
     vivos = g[g["saldo_natural"].abs() > UMBRAL_FOLIO].copy()
-
     corte = pd.Timestamp(fecha_corte)
     vivos["dias"] = (corte - vivos["primera_fecha"]).dt.days
 
     def bucket(d):
-        if pd.isna(d):
-            return "sin fecha"
-        if d < 0:
-            return "fecha posterior al corte"
-        if d <= 30:
-            return "0-30"
-        if d <= 60:
-            return "31-60"
-        if d <= 90:
-            return "61-90"
+        if pd.isna(d): return "sin fecha"
+        if d < 0: return "fecha posterior al corte"
+        if d <= 30: return "0-30"
+        if d <= 60: return "31-60"
+        if d <= 90: return "61-90"
         return "90+"
 
     vivos["antiguedad_observada"] = vivos["dias"].apply(bucket)
 
     def tipo_saldo(row):
         s = row["saldo_natural"]
-        nat = row["naturaleza"]
-        if nat == "DEUDORA":
-            if s > 0:
-                return "🔵 Saldo deudor pendiente"
-            return "🔴 Saldo contrario a naturaleza (acreedor)"
-        if nat == "ACREEDORA":
-            if s > 0:
-                return "🟣 Saldo acreedor pendiente / por aplicar"
-            return "🔴 Saldo contrario a naturaleza (deudor)"
+        if row["tipo_cuenta"] == "CLIENTES":
+            return "🔵 Pendiente de cobro" if s > 0 else "🔴 Saldo contrario a naturaleza / a favor"
+        if row["tipo_cuenta"] == "PROVEEDORES":
+            return "🟣 Pendiente de pago" if s > 0 else "🔴 Saldo contrario a naturaleza / a favor"
         return "⚫ Naturaleza indeterminada"
 
     vivos["tipo_saldo"] = vivos.apply(tipo_saldo, axis=1)
     vivos["multiples_movimientos"] = vivos["n_movs"] > 2
-
-    return vivos.sort_values(
-        ["dias", "saldo_natural"], ascending=[False, False]
-    )
-
+    return vivos.sort_values(["dias", "saldo_natural"], ascending=[False, False])
 
 def detectar_cruces_por_referencia(movs):
-    """
-    Busca el mismo folio en cuentas distintas, pero SOLO dentro del mismo
-    empresa ARPON, evitando cruces entre empresas distintas.
-    """
+    """Busca el mismo documento en cuentas distintas del mismo tipo y empresa."""
     mv = movs[
-        movs["es_folio"]
+        movs["es_documento_conciliable"]
         & movs["efecto_natural"].notna()
     ].copy()
-
     if mv.empty:
         return pd.DataFrame()
 
     por_cuenta = (
         mv.groupby(
             [
-                "sistema_origen", "empresa_uid", "empresa",
-                "referencia_norm", "cuenta_logica_uid",
-                "meta_codigo", "meta_nombre", "naturaleza"
+                "sistema_origen", "empresa_uid", "empresa", "tipo_cuenta",
+                "referencia_norm", "cuenta_logica_uid", "meta_codigo", "meta_nombre",
+                "naturaleza"
             ],
             as_index=False,
         )
         .agg(
-            cargos=("cargos", "sum"),
-            abonos=("abonos", "sum"),
-            efecto_natural=("efecto_natural", "sum"),
-            n_movs=("efecto_natural", "size"),
+            cargos=("cargos", "sum"), abonos=("abonos", "sum"),
+            efecto_natural=("efecto_natural", "sum"), n_movs=("efecto_natural", "size"),
             archivos=("archivo", lambda x: " | ".join(sorted(set(map(str, x))))),
         )
     )
 
-    claves_ref = ["sistema_origen", "empresa_uid", "referencia_norm"]
+    claves_ref = ["sistema_origen", "empresa_uid", "tipo_cuenta", "referencia_norm"]
     nivel_ref = (
         por_cuenta.groupby(claves_ref)
         .agg(
@@ -1196,55 +1156,40 @@ def detectar_cruces_por_referencia(movs):
             hay_positivo=("efecto_natural", lambda x: (x > UMBRAL_FOLIO).any()),
             hay_negativo=("efecto_natural", lambda x: (x < -UMBRAL_FOLIO).any()),
             neto_global=("efecto_natural", "sum"),
-        )
-        .reset_index()
+        ).reset_index()
     )
-
     refs = nivel_ref[
-        (nivel_ref["num_cuentas"] > 1)
-        & nivel_ref["hay_positivo"]
-        & nivel_ref["hay_negativo"]
+        (nivel_ref["num_cuentas"] > 1) & nivel_ref["hay_positivo"] & nivel_ref["hay_negativo"]
     ].copy()
-
     if refs.empty:
         return pd.DataFrame()
 
     detalle = por_cuenta.merge(
-        refs[claves_ref + ["num_cuentas", "neto_global"]],
-        on=claves_ref,
-        how="inner",
+        refs[claves_ref + ["num_cuentas", "neto_global"]], on=claves_ref, how="inner"
     )
     detalle["amarre_aprox"] = detalle["neto_global"].abs() <= UMBRAL_TOLERANCIA
     detalle["nivel_evidencia"] = np.where(
-        detalle["amarre_aprox"], "ALTA - neto aproximado a cero",
-        "MEDIA - efectos opuestos con remanente"
+        detalle["amarre_aprox"], "ALTA - neto a cero", "MEDIA - efectos opuestos con remanente"
     )
     return detalle.sort_values(
-        ["sistema_origen", "empresa_uid", "referencia_norm", "efecto_natural"],
-        ascending=[True, True, True, False],
+        ["sistema_origen", "empresa_uid", "tipo_cuenta", "referencia_norm", "efecto_natural"],
+        ascending=[True, True, True, True, False],
     )
 
-
 def detectar_coincidencias_por_evidencia(movs):
-    """
-    Coincidencias por fecha + concepto + importe dentro del mismo sistema y
-    empresa. Se clasifican por calidad del amarre para evitar presentar como
-    conciliación fuerte un grupo muchos-a-muchos con remanente.
-    """
+    """Coincidencias exactas por fecha + concepto + importe dentro del mismo tipo de cuenta."""
     mv = movs[
         movs["efecto_natural"].notna()
         & (movs["importe_abs"] > UMBRAL_FOLIO)
         & movs["concepto_norm"].ne("")
     ].copy()
-
     if mv.empty:
         return pd.DataFrame()
 
     mv = mv[mv["efecto_natural"].abs() > UMBRAL_FOLIO].copy()
     claves = [
-        "sistema_origen", "empresa_uid", "fecha", "concepto_norm", "importe_abs"
+        "sistema_origen", "empresa_uid", "tipo_cuenta", "fecha", "concepto_norm", "importe_abs"
     ]
-
     grupos = (
         mv.groupby(claves)
         .agg(
@@ -1255,77 +1200,43 @@ def detectar_coincidencias_por_evidencia(movs):
             n_positivos=("efecto_natural", lambda x: int((x > 0).sum())),
             n_negativos=("efecto_natural", lambda x: int((x < 0).sum())),
             neto_grupo=("efecto_natural", "sum"),
-        )
-        .reset_index()
+        ).reset_index()
     )
-
     validos = grupos[
-        (grupos["num_cuentas"] > 1)
-        & grupos["hay_positivo"]
-        & grupos["hay_negativo"]
+        (grupos["num_cuentas"] > 1) & grupos["hay_positivo"] & grupos["hay_negativo"]
     ].copy()
-
     if validos.empty:
         return pd.DataFrame()
 
     validos["amarre_aprox"] = validos["neto_grupo"].abs() <= UMBRAL_TOLERANCIA
     validos["nivel_evidencia"] = np.select(
         [
-            validos["amarre_aprox"]
-            & validos["n_positivos"].eq(1)
-            & validos["n_negativos"].eq(1),
+            validos["amarre_aprox"] & validos["n_positivos"].eq(1) & validos["n_negativos"].eq(1),
             validos["amarre_aprox"],
         ],
-        [
-            "ALTA - correspondencia 1:1",
-            "MEDIA - neto cero con múltiples movimientos",
-        ],
+        ["ALTA - correspondencia 1:1", "MEDIA - neto cero con múltiples movimientos"],
         default="BAJA - coincidencia parcial con remanente",
     )
     validos["evidencia_id"] = np.arange(1, len(validos) + 1)
-
     det = mv.merge(validos, on=claves, how="inner")
     cols = [
-        "evidencia_id", "nivel_evidencia", "amarre_aprox",
-        "movimiento_id", "fila_origen", "sistema_origen", "empresa_uid",
-        "empresa", "fecha", "concepto", "concepto_norm",
-        "importe_abs", "archivo", "cuenta_uid", "cuenta_logica_uid",
-        "meta_codigo", "meta_nombre", "naturaleza",
-        "referencia_original", "referencia_norm", "referencia_fuente",
-        "cargos", "abonos", "efecto_natural",
-        "num_cuentas", "n_movs_grupo", "n_positivos", "n_negativos", "neto_grupo"
+        "evidencia_id", "nivel_evidencia", "amarre_aprox", "movimiento_id", "fila_origen",
+        "sistema_origen", "empresa_uid", "empresa", "tipo_cuenta", "fecha", "concepto",
+        "concepto_norm", "importe_abs", "archivo", "cuenta_uid", "cuenta_logica_uid",
+        "meta_codigo", "meta_nombre", "naturaleza", "referencia_original", "referencia_norm",
+        "referencia_fuente", "cargos", "abonos", "efecto_natural", "num_cuentas",
+        "n_movs_grupo", "n_positivos", "n_negativos", "neto_grupo"
     ]
-    return det[cols].sort_values(
-        ["evidencia_id", "efecto_natural"], ascending=[True, False]
-    )
-
+    return det[cols].sort_values(["evidencia_id", "efecto_natural"], ascending=[True, False])
 
 def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
-    """
-    Regresa los movimientos con una marca auditable de conciliación.
-
-    CONCILIADO:
-      - el folio se salda dentro de la misma cuenta; o
-      - el folio cruza cuentas con efectos opuestos y neto aproximado a cero; o
-      - la evidencia por fecha + concepto + importe tiene neto cero.
-
-    REVISAR:
-      - existen efectos opuestos, pero el grupo conserva un remanente.
-
-    No elimina ni compensa movimientos; únicamente agrega trazabilidad para
-    poder marcar la fila original del auxiliar ARPON.
-    """
+    """Marca conciliaciones sin alterar ni eliminar movimientos de origen."""
     m = movs.copy()
     if "movimiento_id" not in m.columns:
         m["movimiento_id"] = np.arange(1, len(m) + 1)
 
     registros = {
-        int(mid): {
-            "estado": "SIN MARCA",
-            "nivel": "",
-            "criterios": [],
-            "codigos": [],
-        }
+        int(mid): {"estado": "SIN MARCA", "nivel": "", "criterios": [], "codigos": []}
         for mid in m["movimiento_id"]
     }
     rango_estado = {"SIN MARCA": 0, "REVISAR": 1, "CONCILIADO": 2}
@@ -1335,57 +1246,43 @@ def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
         nivel_base = str(nivel).split(" - ", 1)[0].strip().upper()
         if nivel_base not in rango_nivel:
             nivel_base = "BAJA"
-
         for mid in ids:
             reg = registros.get(int(mid))
             if reg is None:
                 continue
-            if rango_estado[estado] > rango_estado[reg["estado"]]:
-                reg["estado"] = estado
-            if rango_nivel[nivel_base] > rango_nivel[reg["nivel"]]:
-                reg["nivel"] = nivel_base
-            if criterio not in reg["criterios"]:
-                reg["criterios"].append(criterio)
-            if codigo not in reg["codigos"]:
-                reg["codigos"].append(codigo)
+            if rango_estado[estado] > rango_estado[reg["estado"]]: reg["estado"] = estado
+            if rango_nivel[nivel_base] > rango_nivel[reg["nivel"]]: reg["nivel"] = nivel_base
+            if criterio not in reg["criterios"]: reg["criterios"].append(criterio)
+            if codigo not in reg["codigos"]: reg["codigos"].append(codigo)
 
-    # Conciliación principal del auxiliar: cargos y abonos del mismo folio
-    # dentro de la misma cuenta. Esta regla funciona incluso cuando el usuario
-    # carga un solo auxiliar ARPON.
-    folios_cuenta = m[
-        m["es_folio"]
+    docs = m[
+        m["es_documento_conciliable"]
         & m["efecto_natural"].notna()
         & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
     ].copy()
-    if not folios_cuenta.empty:
+    if not docs.empty:
         claves_cuenta = [
-            "sistema_origen", "empresa_uid", "cuenta_uid", "referencia_norm"
+            "sistema_origen", "empresa_uid", "tipo_cuenta", "cuenta_logica_uid", "referencia_norm"
         ]
         grupos_cuenta = (
-            folios_cuenta.groupby(claves_cuenta, as_index=False)
+            docs.groupby(claves_cuenta, as_index=False)
             .agg(
                 n_movs=("movimiento_id", "size"),
-                hay_positivo=(
-                    "efecto_natural", lambda x: (x > UMBRAL_FOLIO).any()
-                ),
-                hay_negativo=(
-                    "efecto_natural", lambda x: (x < -UMBRAL_FOLIO).any()
-                ),
+                hay_positivo=("efecto_natural", lambda x: (x > UMBRAL_FOLIO).any()),
+                hay_negativo=("efecto_natural", lambda x: (x < -UMBRAL_FOLIO).any()),
                 neto_cuenta=("efecto_natural", "sum"),
             )
         )
         grupos_cuenta = grupos_cuenta[
-            (grupos_cuenta["n_movs"] > 1)
-            & grupos_cuenta["hay_positivo"]
-            & grupos_cuenta["hay_negativo"]
+            (grupos_cuenta["n_movs"] > 1) & grupos_cuenta["hay_positivo"] & grupos_cuenta["hay_negativo"]
         ]
-
         for _, grupo in grupos_cuenta.iterrows():
             amarra = abs(float(grupo["neto_cuenta"])) <= UMBRAL_TOLERANCIA
             mask = (
                 m["sistema_origen"].eq(grupo["sistema_origen"])
                 & m["empresa_uid"].eq(grupo["empresa_uid"])
-                & m["cuenta_uid"].eq(grupo["cuenta_uid"])
+                & m["tipo_cuenta"].eq(grupo["tipo_cuenta"])
+                & m["cuenta_logica_uid"].eq(grupo["cuenta_logica_uid"])
                 & m["referencia_norm"].eq(grupo["referencia_norm"])
                 & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
             )
@@ -1393,70 +1290,47 @@ def marcar_movimientos_conciliacion(movs, cruces_ref, evidencias):
                 m.loc[mask, "movimiento_id"],
                 "CONCILIADO" if amarra else "REVISAR",
                 "ALTA" if amarra else "MEDIA",
-                "FOLIO SALDADO" if amarra else "FOLIO PARCIAL",
-                f"CTA:{grupo['referencia_norm']}",
+                "DOCUMENTO SALDADO" if amarra else "DOCUMENTO PARCIAL",
+                f"DOC:{grupo['referencia_norm']}",
             )
 
     if cruces_ref is not None and not cruces_ref.empty:
         claves = [
-            "sistema_origen", "empresa_uid", "referencia_norm",
+            "sistema_origen", "empresa_uid", "tipo_cuenta", "referencia_norm",
             "amarre_aprox", "nivel_evidencia",
         ]
         for _, grupo in cruces_ref[claves].drop_duplicates().iterrows():
             mask = (
                 m["sistema_origen"].eq(grupo["sistema_origen"])
                 & m["empresa_uid"].eq(grupo["empresa_uid"])
+                & m["tipo_cuenta"].eq(grupo["tipo_cuenta"])
                 & m["referencia_norm"].eq(grupo["referencia_norm"])
-                & m["es_folio"]
+                & m["es_documento_conciliable"]
                 & (m["efecto_natural"].abs() > UMBRAL_FOLIO)
             )
             registrar(
                 m.loc[mask, "movimiento_id"],
                 "CONCILIADO" if bool(grupo["amarre_aprox"]) else "REVISAR",
-                grupo["nivel_evidencia"],
-                "FOLIO",
+                grupo["nivel_evidencia"], "DOCUMENTO ENTRE CUENTAS",
                 f"REF:{grupo['referencia_norm']}",
             )
 
     if evidencias is not None and not evidencias.empty:
-        grupos_evidencia = evidencias[
-            ["evidencia_id", "nivel_evidencia", "amarre_aprox"]
-        ].drop_duplicates()
+        grupos_evidencia = evidencias[["evidencia_id", "nivel_evidencia", "amarre_aprox"]].drop_duplicates()
         for _, grupo in grupos_evidencia.iterrows():
-            ids = evidencias.loc[
-                evidencias["evidencia_id"].eq(grupo["evidencia_id"]),
-                "movimiento_id",
-            ].drop_duplicates()
+            ids = evidencias.loc[evidencias["evidencia_id"].eq(grupo["evidencia_id"]), "movimiento_id"].drop_duplicates()
             nivel = str(grupo["nivel_evidencia"]).split(" - ", 1)[0].upper()
-            if nivel == "ALTA":
-                criterio = "EVIDENCIA 1:1"
-            elif nivel == "MEDIA":
-                criterio = "EVIDENCIA GRUPAL"
-            else:
-                criterio = "COINCIDENCIA PARCIAL"
-            registrar(
-                ids,
-                "CONCILIADO" if bool(grupo["amarre_aprox"]) else "REVISAR",
-                grupo["nivel_evidencia"],
-                criterio,
-                f"EVD:{int(grupo['evidencia_id'])}",
-            )
+            criterio = "EVIDENCIA 1:1" if nivel == "ALTA" else "EVIDENCIA GRUPAL" if nivel == "MEDIA" else "COINCIDENCIA PARCIAL"
+            # Solo correspondencia 1:1 exacta se eleva automáticamente a CONCILIADO.
+            estado = "CONCILIADO" if bool(grupo["amarre_aprox"]) and nivel == "ALTA" else "REVISAR"
+            registrar(ids, estado, grupo["nivel_evidencia"], criterio, f"EVD:{int(grupo['evidencia_id'])}")
 
-    m["conciliacion_estado"] = m["movimiento_id"].map(
-        lambda mid: registros[int(mid)]["estado"]
-    )
-    m["conciliacion_nivel"] = m["movimiento_id"].map(
-        lambda mid: registros[int(mid)]["nivel"]
-    )
-    m["conciliacion_criterio"] = m["movimiento_id"].map(
-        lambda mid: " + ".join(registros[int(mid)]["criterios"])
-    )
-    m["conciliacion_codigo"] = m["movimiento_id"].map(
-        lambda mid: " | ".join(registros[int(mid)]["codigos"])
-    )
+    m["conciliacion_estado"] = m["movimiento_id"].map(lambda mid: registros[int(mid)]["estado"])
+    m["conciliacion_nivel"] = m["movimiento_id"].map(lambda mid: registros[int(mid)]["nivel"])
+    m["conciliacion_criterio"] = m["movimiento_id"].map(lambda mid: " + ".join(registros[int(mid)]["criterios"]))
+    m["conciliacion_codigo"] = m["movimiento_id"].map(lambda mid: " | ".join(registros[int(mid)]["codigos"]))
     m["conciliacion_marcada"] = m["conciliacion_estado"].ne("SIN MARCA")
     return m
-
 
 def _buscar_fila_encabezado_arpon(ws):
     limite = min(ws.max_row, 60)
@@ -1502,7 +1376,7 @@ def _libro_desde_archivo(file_bytes, file_name):
 
 
 def construir_auxiliar_marcado(file_bytes, file_name, marcas):
-    """Conserva el auxiliar y agrega color + código en la fila conciliada."""
+    """Conserva el auxiliar original y agrega marcas de conciliación/reconstrucción."""
     wb = _libro_desde_archivo(file_bytes, file_name)
     ws = wb.worksheets[0]
     fila_header = _buscar_fila_encabezado_arpon(ws)
@@ -1521,13 +1395,10 @@ def construir_auxiliar_marcado(file_bytes, file_name, marcas):
         celda_header._style = copy(fuente_header._style)
         celda_header.number_format = fuente_header.number_format
         celda_header.alignment = copy(fuente_header.alignment)
-    celda_header.value = "Conciliación"
-    celda_header.font = copy(celda_header.font)
+    celda_header.value = "Conciliación / Auditoría"
     celda_header.font = Font(
-        name=celda_header.font.name,
-        size=celda_header.font.size,
-        bold=True,
-        color=celda_header.font.color,
+        name=celda_header.font.name, size=celda_header.font.size,
+        bold=True, color=celda_header.font.color,
     )
     celda_header.alignment = Alignment(horizontal="center", vertical="center")
 
@@ -1535,51 +1406,67 @@ def construir_auxiliar_marcado(file_bytes, file_name, marcas):
     verde_suave = PatternFill("solid", fgColor="EAF4E3")
     amarillo = PatternFill("solid", fgColor="FFEB9C")
     amarillo_suave = PatternFill("solid", fgColor="FFF7D6")
+    azul = PatternFill("solid", fgColor="D9EAF7")
+    azul_suave = PatternFill("solid", fgColor="EEF6FC")
 
     leyenda = [
-        (1, "Marca de conciliación"),
+        (1, "Marca de auditoría · ℹ Azul = fila ARPON reconstruida"),
         (2, "✓ Verde = conciliado"),
         (3, "⚠ Amarillo = revisar remanente"),
     ]
-    for fila, texto in leyenda:
+    for fila, texto_leyenda in leyenda:
         celda = ws.cell(fila, columna_estado)
         if es_vacio(celda.value):
-            celda.value = texto
+            celda.value = texto_leyenda
             celda.font = Font(bold=(fila == 1), color="1F1F1F", size=10)
-            celda.fill = verde if fila == 2 else amarillo if fila == 3 else verde_suave
+            celda.fill = verde if fila == 2 else amarillo if fila == 3 else azul if fila == 4 else verde_suave
 
     for _, marca in marcas.sort_values("fila_origen").iterrows():
         fila = int(marca["fila_origen"])
         if fila < 1 or fila > ws.max_row:
             continue
 
-        conciliado = marca["conciliacion_estado"] == "CONCILIADO"
-        simbolo = "✓" if conciliado else "⚠"
-        texto = (
-            f"{simbolo} {marca['conciliacion_estado']} · "
-            f"{marca['conciliacion_criterio']} · {marca['conciliacion_codigo']}"
-        )
-        celda = ws.cell(fila, columna_estado)
-        celda.value = texto
-        celda.fill = verde if conciliado else amarillo
-        celda.font = Font(
-            bold=True,
-            color="006100" if conciliado else "9C6500",
-            size=10,
-        )
-        celda.alignment = Alignment(vertical="center", wrap_text=False)
+        tiene_conc = bool(marca.get("conciliacion_marcada", False))
+        reparada = bool(marca.get("fila_reparada", False))
 
-        relleno_fila = verde_suave if conciliado else amarillo_suave
+        if tiene_conc:
+            conciliado = marca["conciliacion_estado"] == "CONCILIADO"
+            simbolo = "✓" if conciliado else "⚠"
+            texto_marca = (
+                f"{simbolo} {marca['conciliacion_estado']} · "
+                f"{marca['conciliacion_criterio']} · {marca['conciliacion_codigo']}"
+            )
+            if reparada:
+                texto_marca += f" · ℹ reconstruida con fila {int(marca['fila_continuacion'])}"
+            fill = verde if conciliado else amarillo
+            fill_row = verde_suave if conciliado else amarillo_suave
+            font_color = "006100" if conciliado else "9C6500"
+        else:
+            texto_marca = f"ℹ RECONSTRUIDA PARA AUDITORÍA · continuación fila {int(marca['fila_continuacion'])}"
+            fill = azul
+            fill_row = azul_suave
+            font_color = "1F4E78"
+
+        celda = ws.cell(fila, columna_estado)
+        celda.value = texto_marca
+        celda.fill = fill
+        celda.font = Font(bold=True, color=font_color, size=10)
+        celda.alignment = Alignment(vertical="center", wrap_text=False)
         for col in range(1, columna_estado):
             origen = ws.cell(fila, col)
             if origen.fill is None or origen.fill.fill_type is None:
-                origen.fill = relleno_fila
+                origen.fill = fill_row
+
+        if reparada and pd.notna(marca.get("fila_continuacion")):
+            fcont = int(marca["fila_continuacion"])
+            if 1 <= fcont <= ws.max_row:
+                ccont = ws.cell(fcont, columna_estado)
+                ccont.value = f"↳ Continuación usada para reconstruir fila {fila}"
+                ccont.fill = azul
+                ccont.font = Font(color="1F4E78", italic=True, size=10)
 
     letra_estado = ws.cell(1, columna_estado).column_letter
-    ws.column_dimensions[letra_estado].width = max(
-        ws.column_dimensions[letra_estado].width or 0,
-        58,
-    )
+    ws.column_dimensions[letra_estado].width = max(ws.column_dimensions[letra_estado].width or 0, 64)
 
     output = BytesIO()
     extension = ".xlsm" if file_name.lower().endswith(".xlsm") else ".xlsx"
@@ -1587,17 +1474,16 @@ def construir_auxiliar_marcado(file_bytes, file_name, marcas):
     nombre_salida = f"{Path(file_name).stem}_MARCADO{extension}"
     return output.getvalue(), nombre_salida
 
-
 @st.cache_data(show_spinner=False)
 def construir_descarga_auxiliares_marcados(archivos, movs):
-    """Devuelve un XLSX/XLSM si es uno, o un ZIP si se cargaron varios."""
+    """Devuelve XLSX/XLSM o ZIP incluyendo conciliaciones y filas reconstruidas."""
     resultados = []
     nombres_usados = set()
 
     for file_name, file_bytes in archivos:
         marcas = movs[
             movs["archivo"].eq(file_name)
-            & movs["conciliacion_marcada"]
+            & (movs["conciliacion_marcada"] | movs["fila_reparada"])
         ].copy()
         data, nombre = construir_auxiliar_marcado(file_bytes, file_name, marcas)
 
@@ -1626,19 +1512,16 @@ def construir_descarga_auxiliares_marcados(archivos, movs):
             zf.writestr(nombre, data)
     return output.getvalue(), "auxiliares_ARPON_MARCADOS.zip", "application/zip"
 
-
 def tabla_referencias(movs):
     cols = [
-        "sistema_origen", "empresa", "archivo", "fila_origen", "fecha",
-        "meta_codigo", "meta_nombre",
-        "concepto", "referencia_original", "referencia_norm",
-        "referencia_tipo", "referencia_fuente", "referencia_recuperada",
+        "sistema_origen", "empresa", "tipo_cuenta", "archivo", "fila_origen",
+        "fila_reparada", "fila_continuacion", "fecha", "meta_codigo", "meta_nombre",
+        "concepto", "referencia_original", "referencia_norm", "referencia_tipo",
+        "es_documento_conciliable", "referencia_fuente", "referencia_recuperada",
         "cargos", "abonos", "naturaleza", "efecto_natural",
-        "conciliacion_estado", "conciliacion_nivel",
-        "conciliacion_criterio", "conciliacion_codigo",
+        "conciliacion_estado", "conciliacion_nivel", "conciliacion_criterio", "conciliacion_codigo",
     ]
     return movs[cols].copy()
-
 
 def aplicar_filtros_tabla(
     df,
@@ -1658,9 +1541,7 @@ def aplicar_filtros_tabla(
         x = x[x["empresa"].fillna("").astype(str).isin(empresas)]
 
     if archivos is not None:
-        if "archivo" in x.columns:
-            x = x[x["archivo"].fillna("").astype(str).isin(archivos)]
-        elif "archivos" in x.columns:
+        if "archivos" in x.columns:
             if not archivos:
                 x = x.iloc[0:0]
             else:
@@ -1669,6 +1550,8 @@ def aplicar_filtros_tabla(
                     x["archivos"].fillna("").astype(str)
                     .str.contains(patron, regex=True)
                 ]
+        elif "archivo" in x.columns:
+            x = x[x["archivo"].fillna("").astype(str).isin(archivos)]
 
     if cuentas is not None and "meta_codigo" in x.columns:
         x = x[x["meta_codigo"].fillna("").astype(str).isin(cuentas)]
@@ -1713,32 +1596,33 @@ def aplicar_filtros_tabla(
 
 def main():
     st.set_page_config(
-        page_title="Auditoría ARPON · Hotel Quartz",
+        page_title="Auditoría ARPON · Clientes y Proveedores · Hotel Quartz",
         layout="wide",
         page_icon="🛡️",
     )
 
-    st.title("🛡️ Auditoría de Saldos ARPON · Hotel Quartz")
+    st.title("🛡️ Auditoría ARPON · Clientes y Proveedores · Hotel Quartz")
     st.caption(f"Motor v{APP_VERSION}")
 
     st.markdown(
         """
-        Motor exclusivo para auxiliares **ARPON de Hotel Quartz**.
+        Motor exclusivo para auxiliares **ARPON de Clientes y Proveedores de Hotel Quartz**.
 
         - valida la estructura **Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo**;
         - identifica empresa, periodo, cuenta y saldo inicial desde el propio reporte;
         - valida **cargos, abonos y saldo acumulado movimiento por movimiento**;
-        - detecta automáticamente la **naturaleza deudora o acreedora**;
-        - conserva y normaliza documentos/folios sin destruir prefijos;
+        - identifica **Clientes / Proveedores** y normaliza el saldo pendiente sin alterar la ecuación ARPON;
+        - conserva y normaliza **folios, documentos numéricos y documentos alfanuméricos** sin destruir identificadores;
         - puede recuperar un folio desde **Concepto** cuando Docto. está vacío;
         - identifica movimientos sin referencia, reversos y posibles duplicados;
         - los cruces se realizan únicamente dentro de la **misma empresa ARPON**;
-        - genera una copia del auxiliar con **color y código de conciliación**.
+        - reconstruye de forma controlada partidas ARPON fragmentadas y deja trazabilidad;
+        - genera una copia del auxiliar con **color y código de conciliación/auditoría**.
         """
     )
 
     uploaded_files = st.file_uploader(
-        "📂 Sube uno o varios Auxiliares de Cuentas de ARPON (Excel o CSV)",
+        "📂 Sube auxiliares ARPON de Clientes y/o Proveedores (Excel o CSV)",
         type=["xlsx", "xls", "xlsm", "csv"],
         accept_multiple_files=True,
     )
@@ -1775,6 +1659,16 @@ def main():
     movs = pd.concat(movs_lista, ignore_index=True)
     resumen = pd.concat(resumen_lista, ignore_index=True)
 
+    solapamientos = detectar_solapamientos_periodos(resumen)
+    if not solapamientos.empty:
+        st.error(
+            "⛔ Se detectaron periodos superpuestos para la misma cuenta. "
+            "Cargar periodos traslapados duplicaría movimientos y puede crear conciliaciones falsas. "
+            "Carga archivos sin días repetidos para esa cuenta."
+        )
+        st.dataframe(solapamientos, use_container_width=True, hide_index=True)
+        st.stop()
+
     # Evitar que cargar dos veces la misma cuenta pase desapercibido.
     repetidas = (
         resumen.groupby(["empresa_uid", "meta_codigo"])["archivo"]
@@ -1783,9 +1677,8 @@ def main():
     )
     if not repetidas.empty:
         st.warning(
-            "⚠️ Hay códigos de cuenta presentes en más de un archivo. "
-            "No necesariamente es un error, pero revisa que no hayas cargado "
-            "dos periodos o copias de la misma cuenta: "
+            "ℹ️ Hay cuentas presentes en más de un archivo. Los periodos no se solapan, "
+            "por lo que el motor los analizará como continuidad histórica: "
             + ", ".join(str(x) for x in repetidas.index)
         )
 
@@ -1829,8 +1722,9 @@ def main():
     else:
         st.success(
             f"Lectura estructural validada: **{n_archivos} archivo(s)** · "
-            f"**{n_cuentas} cuenta(s)** · **{n_movs:,} movimientos**. "
-            "La estructura, los totales disponibles y las secuencias de saldo fueron validados."
+            f"**{n_cuentas} cuenta(s)** · **{n_movs:,} movimientos** · "
+            f"**{int(diag_df['n_filas_reconstruidas'].fillna(0).sum()):,} fila(s) reconstruida(s)**. "
+            "La estructura, los totales ARPON disponibles y las secuencias de saldo fueron validados."
         )
 
     for _, d in diag_df.iterrows():
@@ -1849,19 +1743,18 @@ def main():
         st.caption(
             f"{estado_amarre} {d['archivo']} · {'ARPON'} [{d.get('formato', 'N/D')}]: "
             f"{int(d['n_headers'])} cuenta(s), {int(d['n_movs']):,} movimientos, "
-            f"Total reportado {gt_txt}."
+            f"Total {d.get('origen_gran_total', 'N/D')} {gt_txt} · reconstruidas {int(d.get('n_filas_reconstruidas', 0))}."
         )
 
     # --------------------------------------------------------------------------
     # KPIs
     # --------------------------------------------------------------------------
-    gran_totales_validos = pd.to_numeric(
-        diag_df.get("gran_total", pd.Series(dtype=float)), errors="coerce"
-    ).dropna()
-    saldo_total = (
-        float(gran_totales_validos.sum())
-        if len(gran_totales_validos) == len(diag_df) and len(diag_df) > 0
-        else float(df_audit["saldo_final_aux"].sum())
+    saldo_total = float(df_audit["saldo_final_pendiente"].sum())
+    saldo_clientes = float(
+        df_audit.loc[df_audit["tipo_cuenta"].eq("CLIENTES"), "saldo_final_pendiente"].sum()
+    )
+    saldo_proveedores = float(
+        df_audit.loc[df_audit["tipo_cuenta"].eq("PROVEEDORES"), "saldo_final_pendiente"].sum()
     )
     bruto_sin_ref = df_audit["importe_bruto_sin_referencia"].sum()
     descuadre_abs = df_audit["descuadre_origen"].abs().sum()
@@ -1871,8 +1764,8 @@ def main():
     n_folios_conciliados = int(
         movs[
             movs["conciliacion_estado"].eq("CONCILIADO")
-            & movs["es_folio"]
-        ][["cuenta_uid", "referencia_norm"]].drop_duplicates().shape[0]
+            & movs["es_documento_conciliable"]
+        ][["cuenta_logica_uid", "referencia_norm"]].drop_duplicates().shape[0]
     )
     n_evidencias = (
         int(df_evidencia["evidencia_id"].nunique())
@@ -1886,7 +1779,7 @@ def main():
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Saldo total reportado", f"${saldo_total:,.2f}")
+    k1.metric("Saldo pendiente normalizado", f"${saldo_total:,.2f}")
     k2.metric(
         "Movs sin referencia",
         f"{n_sin_ref:,}",
@@ -1897,13 +1790,15 @@ def main():
         f"${descuadre_abs:,.2f}",
         help="Suma de valores absolutos por cuenta; evita compensar + y -.",
     )
-    k4.metric("Folios conciliados", n_folios_conciliados)
+    k4.metric("Documentos conciliados", n_folios_conciliados)
     k5.metric("Cruces por evidencia", n_evidencias)
     k6.metric("Cuentas a revisar", n_revisar)
+    n_reparaciones = int(movs["fila_reparada"].sum())
     st.caption(
-        f"Marcas para auxiliares: {n_partidas_conciliadas:,} partida(s) "
-        f"conciliada(s) y {n_partidas_revisar:,} partida(s) con remanente "
-        "para revisión."
+        f"Pendiente normalizado · Clientes: ${saldo_clientes:,.2f} · "
+        f"Proveedores: ${saldo_proveedores:,.2f}. Marcas: "
+        f"{n_partidas_conciliadas:,} conciliada(s), {n_partidas_revisar:,} a revisar y "
+        f"{n_reparaciones:,} fila(s) ARPON reconstruida(s)."
     )
 
     # Fecha de corte
@@ -2019,7 +1914,7 @@ def main():
         [
             "🔎 Hallazgos",
             "🚦 Semáforo",
-            "📑 Folios",
+            "📑 Documentos",
             "✅ Conciliación marcada",
             "🏷️ Referencias",
             "📉 Gráficos",
@@ -2062,7 +1957,7 @@ def main():
         h3.metric("Refs recuperadas", len(refs_rec))
         h4.metric("Montos negativos", len(negativos))
         h5.metric("Posibles duplicados", len(duplicados))
-        h6.metric("Folios 90+ observados", len(viejos))
+        h6.metric("Documentos 90+ observados", len(viejos))
 
         if len(descuadres):
             st.markdown("#### 🟠 Descuadre contra el saldo final reportado por ARPON")
@@ -2112,6 +2007,21 @@ def main():
                 hide_index=True,
             )
 
+        reparadas = movs_vista[movs_vista["fila_reparada"]].copy()
+        if len(reparadas):
+            st.markdown("#### 🔧 Filas ARPON reconstruidas")
+            st.caption(
+                "El archivo fuente partió una partida en dos filas. El motor reconstruyó "
+                "Concepto/Cargo/Abono/Saldo y posteriormente certificó el amarre completo."
+            )
+            st.dataframe(
+                reparadas[[
+                    "archivo", "fila_origen", "fila_continuacion", "fecha", "meta_codigo",
+                    "poliza", "referencia_original", "concepto", "cargos", "abonos", "saldo_acumulado"
+                ]],
+                use_container_width=True, hide_index=True,
+            )
+
         if len(negativos):
             st.markdown("#### 🟣 Montos negativos / reversos")
             st.caption(
@@ -2148,7 +2058,7 @@ def main():
             )
 
         if len(contrarios):
-            st.markdown("#### ⚠️ Folios con saldo contrario a la naturaleza")
+            st.markdown("#### ⚠️ Documentos con saldo contrario a la naturaleza")
             st.dataframe(
                 contrarios[
                     [
@@ -2163,7 +2073,7 @@ def main():
 
         if not any(
             [
-                len(descuadres), len(sin_ref_movs), len(refs_rec),
+                len(descuadres), len(sin_ref_movs), len(refs_rec), len(reparadas),
                 len(negativos), len(duplicados), len(contrarios)
             ]
         ):
@@ -2185,9 +2095,10 @@ def main():
         )
 
         cols = [
-            "sistema_origen", "empresa", "archivo", "meta_codigo",
-            "meta_nombre", "naturaleza", "naturaleza_confianza", "estado", "saldo_inicial",
-            "total_cargos", "total_abonos", "saldo_final_aux",
+            "sistema_origen", "empresa", "tipo_cuenta", "archivo", "meta_codigo",
+            "meta_nombre", "naturaleza", "naturaleza_confianza", "estado",
+            "saldo_inicial", "saldo_inicial_pendiente",
+            "total_cargos", "total_abonos", "saldo_final_aux", "saldo_final_pendiente",
             "movs_con_referencia", "movs_sin_referencia",
             "n_sin_referencia", "importe_bruto_sin_referencia",
             "n_refs_recuperadas", "n_referencias_libres",
@@ -2201,6 +2112,9 @@ def main():
                 "saldo_inicial": st.column_config.NumberColumn(
                     "Saldo inicial", format="$%.2f"
                 ),
+                "saldo_inicial_pendiente": st.column_config.NumberColumn(
+                    "Saldo inicial pendiente", format="$%.2f"
+                ),
                 "total_cargos": st.column_config.NumberColumn(
                     "Cargos", format="$%.2f"
                 ),
@@ -2209,6 +2123,9 @@ def main():
                 ),
                 "saldo_final_aux": st.column_config.NumberColumn(
                     "Saldo final ARPON", format="$%.2f"
+                ),
+                "saldo_final_pendiente": st.column_config.NumberColumn(
+                    "Saldo pendiente", format="$%.2f"
                 ),
                 "movs_con_referencia": st.column_config.NumberColumn(
                     "Efecto con referencia", format="$%.2f"
@@ -2229,9 +2146,9 @@ def main():
     # Folios
     # --------------------------------------------------------------------------
     with tabs[2]:
-        st.subheader("📑 Folios documentales abiertos")
+        st.subheader("📑 Documentos / folios abiertos")
         st.caption(
-            "Solo incluye referencias con forma documental reconocible. "
+            "Incluye folios prefijados, numéricos y documentos alfanuméricos reconocibles. "
             "La antigüedad es observada desde la primera fecha del folio, "
             "no fecha contractual de vencimiento."
         )
@@ -2377,10 +2294,10 @@ def main():
                 height=min(620, 85 + 35 * len(partidas_pantalla)),
             )
 
-        st.markdown("#### A. Cruces adicionales entre cuentas por el mismo folio")
+        st.markdown("#### A. Cruces adicionales entre cuentas por el mismo documento")
         if cruces_ref_vista.empty:
             st.info(
-                "No se encontraron folios idénticos con efectos opuestos "
+                "No se encontraron documentos idénticos con efectos opuestos "
                 "entre cuentas cargadas."
             )
         else:
@@ -2390,10 +2307,10 @@ def main():
                 hide_index=True,
             )
 
-        st.markdown("#### B. Coincidencias fuertes aunque el folio sea diferente")
+        st.markdown("#### B. Coincidencias fuertes aunque el documento sea diferente")
         st.caption(
             "Misma fecha + mismo concepto + mismo importe absoluto + "
-            "efecto natural opuesto entre cuentas. Es evidencia para conciliar; "
+            "efecto pendiente opuesto entre cuentas del mismo tipo. Es evidencia para revisar/conciliar; "
             "no se basa en similitud difusa de nombres."
         )
         if evidencia_vista.empty:
@@ -2441,9 +2358,9 @@ def main():
     # Gráficos
     # --------------------------------------------------------------------------
     with tabs[5]:
-        st.subheader("📉 Composición del saldo por naturaleza")
+        st.subheader("📉 Composición del saldo pendiente normalizado")
 
-        saldo_ini = audit_vista["saldo_inicial"].sum()
+        saldo_ini = audit_vista["saldo_inicial_pendiente"].sum()
         con_ref = audit_vista["movs_con_referencia"].sum()
         sin_ref = audit_vista["movs_sin_referencia"].sum()
         desc = audit_vista["descuadre_origen"].sum()
@@ -2474,7 +2391,7 @@ def main():
         )
         fig.update_layout(
             barmode="relative",
-            title="Composición del saldo reportado",
+            title="Composición del saldo pendiente normalizado",
             yaxis_title="Monto",
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -2490,12 +2407,13 @@ def main():
 
         st.markdown("#### Detección de naturaleza")
         diag_cols = [
-            "sistema_origen", "empresa", "archivo", "meta_codigo",
+            "sistema_origen", "empresa", "tipo_cuenta", "archivo", "meta_codigo",
             "meta_nombre", "naturaleza", "naturaleza_confianza",
-            "esperado_deudora", "error_deudora",
-            "esperado_acreedora", "error_acreedora", "saldo_final_aux",
-            "naturaleza_secuencia", "n_errores_saldo_secuencia",
-            "max_error_saldo_secuencia"
+            "saldo_inicial", "total_cargos", "total_abonos", "esperado_arpon",
+            "saldo_final_aux", "error_arpon", "saldo_final_pendiente",
+            "ecuacion_saldo_fuente", "n_errores_saldo_secuencia",
+            "max_error_saldo_secuencia", "error_ultimo_saldo_vs_total",
+            "n_filas_reconstruidas"
         ]
         diag_cols = [c for c in diag_cols if c in df_audit.columns]
         st.dataframe(
@@ -2520,11 +2438,29 @@ def main():
     st.divider()
     st.subheader("⬇️ Exportación")
 
+    ejecucion_rows = []
+    fecha_ejecucion = pd.Timestamp.now(tz="UTC").isoformat()
+    for uf in uploaded_files:
+        data_bytes = uf.getvalue()
+        ejecucion_rows.append({
+            "version_motor": APP_VERSION,
+            "fecha_ejecucion_utc": fecha_ejecucion,
+            "archivo": uf.name,
+            "sha256": hashlib.sha256(data_bytes).hexdigest(),
+            "bytes": len(data_bytes),
+            "tolerancia_contable": UMBRAL_TOLERANCIA,
+            "umbral_documento": UMBRAL_FOLIO,
+        })
+    ejecucion_df = pd.DataFrame(ejecucion_rows)
+    reparaciones_df = movs[movs["fila_reparada"]].copy()
+
     export_tables = {
+        "Ejecucion": ejecucion_df,
         "Semaforo": df_audit,
-        "Folios": folios,
+        "Documentos": folios,
         "Movimientos": movs,
-        "Cruces_folio": df_cruces_ref,
+        "Reparaciones_ARPON": reparaciones_df,
+        "Cruces_documento": df_cruces_ref,
         "Cruces_evidencia": df_evidencia,
         "Diagnostico": diag_df,
     }
@@ -2538,7 +2474,7 @@ def main():
         ),
     )
 
-    if n_partidas_conciliadas or n_partidas_revisar:
+    if n_partidas_conciliadas or n_partidas_revisar or n_reparaciones:
         archivos_origen = [
             (uf.name, uf.getvalue()) for uf in uploaded_files
         ]
@@ -2551,14 +2487,13 @@ def main():
             file_name=nombre_marcado,
             mime=mime_marcado,
             help=(
-                "Agrega una columna Conciliación y colorea las filas sin modificar "
-                "póliza, fecha, documento, concepto, cargos, abonos ni saldo."
+                "Agrega una columna de auditoría y colorea conciliaciones/reconstrucciones "
+                "sin modificar póliza, fecha, documento, concepto, cargos, abonos ni saldo del origen."
             ),
         )
     else:
         st.info(
-            "No hay partidas de conciliación para marcar con los archivos cargados. "
-            "Los cruces requieren movimientos relacionados entre cuentas."
+            "No hay partidas de conciliación ni filas reconstruidas para marcar con los archivos cargados."
         )
 
 
