@@ -16,7 +16,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "5.1 ARPON · HOTEL QUARTZ · CLIENTES + PROVEEDORES"
+APP_VERSION = "5.2 ARPON · HOTEL QUARTZ · CLIENTES + PROVEEDORES"
 # Tolerancia contable en moneda. Se usa para validaciones y conciliaciones.
 # Dos centavos evitan falsos errores binarios de float sin aceptar diferencias materiales.
 UMBRAL_TOLERANCIA = 0.02
@@ -1603,120 +1603,227 @@ def _inyectar_estilos_ui():
         """
         <style>
         :root {
-            --q-bg: #f5f7fb;
-            --q-surface: #ffffff;
-            --q-text: #0f172a;
-            --q-muted: #64748b;
-            --q-border: #e2e8f0;
-            --q-primary: #0f766e;
-            --q-primary-soft: #ecfdf5;
-            --q-success: #15803d;
-            --q-success-soft: #f0fdf4;
-            --q-warning: #b45309;
-            --q-warning-soft: #fffbeb;
-            --q-danger: #b91c1c;
-            --q-danger-soft: #fef2f2;
-            --q-info: #1d4ed8;
-            --q-info-soft: #eff6ff;
+            --q-bg: #F7F6F2;
+            --q-surface: #FFFFFF;
+            --q-surface-soft: #F1EFE7;
+            --q-text: #1B1B19;
+            --q-muted: #706F69;
+            --q-border: #E4E1D8;
+            --q-primary: #A8A16B;
+            --q-primary-dark: #6F6A43;
+            --q-primary-soft: #F2F0E5;
+            --q-success: #35664A;
+            --q-warning: #9B6A2A;
+            --q-danger: #9A4742;
+            --q-info: #626573;
         }
 
+        html, body, [class*="css"] { color: var(--q-text); }
         .stApp { background: var(--q-bg); }
-        [data-testid="stHeader"] { background: rgba(245,247,251,.92); }
-        [data-testid="stSidebar"] { background: #0b1220; }
-        [data-testid="stSidebar"] * { color: #e5e7eb; }
-        [data-testid="stSidebar"] label { color: #dbe4ee !important; }
-        [data-testid="stSidebar"] .stCaptionContainer p { color: #94a3b8 !important; }
+        [data-testid="stHeader"] {
+            background: rgba(247,246,242,.94);
+            border-bottom: 1px solid rgba(228,225,216,.72);
+            backdrop-filter: blur(10px);
+        }
+
+        /* Sidebar Quartz: claro, sobrio y sin bloques oscuros. */
+        [data-testid="stSidebar"] {
+            background: var(--q-surface-soft);
+            border-right: 1px solid var(--q-border);
+        }
+        [data-testid="stSidebar"] * { color: var(--q-text); }
+        [data-testid="stSidebar"] label { color: #3C3B37 !important; font-weight: 650; }
+        [data-testid="stSidebar"] .stCaptionContainer p { color: var(--q-muted) !important; }
         [data-testid="stSidebar"] [data-baseweb="select"] > div,
-        [data-testid="stSidebar"] input { background: #111827; border-color: #334155; }
+        [data-testid="stSidebar"] input,
+        [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+            background: #FFFFFF;
+            border-color: #D8D4C8;
+            box-shadow: none;
+        }
+        [data-testid="stSidebar"] hr { border-color: #D8D4C8; }
 
         .block-container {
-            max-width: 1500px;
-            padding-top: 1.6rem;
+            max-width: 1480px;
+            padding-top: 1.55rem;
             padding-bottom: 3rem;
         }
 
-        h1, h2, h3 { color: var(--q-text); letter-spacing: -.02em; }
+        h1, h2, h3 { color: var(--q-text); letter-spacing: -.025em; }
         p, .stCaptionContainer { color: var(--q-muted); }
 
         .q-eyebrow {
             display: inline-flex; align-items: center; gap: 7px;
-            font-size: .73rem; font-weight: 800; letter-spacing: .08em;
-            text-transform: uppercase; color: var(--q-primary);
-            background: var(--q-primary-soft); border: 1px solid #a7f3d0;
-            border-radius: 999px; padding: 6px 10px; margin-bottom: 12px;
+            font-size: .71rem; font-weight: 800; letter-spacing: .105em;
+            text-transform: uppercase; color: var(--q-primary-dark);
+            background: transparent;
+            border: 1px solid #D8D2B3;
+            border-radius: 999px; padding: 6px 10px; margin-bottom: 13px;
         }
+
+        /* Hero sin gradientes ni negro: superficie editorial con acento Quartz. */
         .q-hero {
-            background: linear-gradient(135deg, #0f172a 0%, #111827 58%, #134e4a 150%);
-            border: 1px solid rgba(255,255,255,.08); border-radius: 22px;
-            padding: 26px 28px; margin-bottom: 18px; color: white;
-            box-shadow: 0 12px 36px rgba(15,23,42,.10);
+            position: relative;
+            background: var(--q-surface);
+            border: 1px solid var(--q-border);
+            border-top: 4px solid var(--q-primary);
+            border-radius: 18px;
+            padding: 27px 29px 25px;
+            margin-bottom: 20px;
+            color: var(--q-text);
+            box-shadow: 0 8px 28px rgba(39,37,28,.045);
         }
-        .q-hero h1 { color: white; margin: 0 0 6px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
-        .q-hero p { color: #cbd5e1; margin: 0; max-width: 900px; }
-        .q-hero-meta { margin-top: 16px; display:flex; gap:10px; flex-wrap:wrap; }
+        .q-hero h1 {
+            color: var(--q-text);
+            margin: 0 0 7px;
+            font-size: clamp(1.7rem, 3vw, 2.28rem);
+            font-weight: 760;
+        }
+        .q-hero p { color: var(--q-muted); margin: 0; max-width: 920px; }
+        .q-hero-meta { margin-top: 17px; display:flex; gap:8px; flex-wrap:wrap; }
         .q-pill {
-            display:inline-flex; align-items:center; border-radius:999px;
-            padding:6px 10px; font-size:.78rem; font-weight:700;
-            color:#d1fae5; background:rgba(16,185,129,.11); border:1px solid rgba(52,211,153,.24);
+            display:inline-flex; align-items:center;
+            border-radius:999px;
+            padding:6px 10px;
+            font-size:.77rem;
+            font-weight:700;
+            color:#4F4B32;
+            background:var(--q-primary-soft);
+            border:1px solid #DDD8B9;
         }
 
         .q-card {
-            background: var(--q-surface); border: 1px solid var(--q-border);
-            border-radius: 18px; padding: 18px 19px; height: 100%;
-            box-shadow: 0 4px 16px rgba(15,23,42,.035);
+            background: var(--q-surface);
+            border: 1px solid var(--q-border);
+            border-radius: 15px;
+            padding: 18px 19px;
+            height: 100%;
+            box-shadow: 0 3px 14px rgba(39,37,28,.028);
         }
-        .q-card-label { font-size:.75rem; color:var(--q-muted); font-weight:800; text-transform:uppercase; letter-spacing:.055em; }
-        .q-card-value { color:var(--q-text); font-size:1.7rem; line-height:1.12; font-weight:800; margin-top:7px; letter-spacing:-.03em; }
-        .q-card-note { color:var(--q-muted); font-size:.8rem; margin-top:7px; }
+        .q-card-label {
+            font-size:.72rem;
+            color:var(--q-muted);
+            font-weight:800;
+            text-transform:uppercase;
+            letter-spacing:.075em;
+        }
+        .q-card-value {
+            color:var(--q-text);
+            font-size:1.68rem;
+            line-height:1.12;
+            font-weight:760;
+            margin-top:7px;
+            letter-spacing:-.035em;
+        }
+        .q-card-note { color:var(--q-muted); font-size:.8rem; margin-top:7px; line-height:1.45; }
 
+        /* Estados: el color solo marca el borde y el punto; el fondo permanece neutro. */
         .q-status {
-            border-radius: 16px; padding: 15px 17px; margin: 4px 0 16px;
-            border: 1px solid var(--q-border); background: white;
-            display:flex; align-items:flex-start; gap:12px;
+            border-radius: 13px;
+            padding: 14px 16px;
+            margin: 4px 0 15px;
+            border: 1px solid var(--q-border);
+            border-left-width: 4px;
+            background: var(--q-surface);
+            display:flex;
+            align-items:flex-start;
+            gap:11px;
+            box-shadow: 0 2px 10px rgba(39,37,28,.02);
         }
-        .q-status.success { background:var(--q-success-soft); border-color:#bbf7d0; }
-        .q-status.warning { background:var(--q-warning-soft); border-color:#fde68a; }
-        .q-status.danger { background:var(--q-danger-soft); border-color:#fecaca; }
-        .q-status.info { background:var(--q-info-soft); border-color:#bfdbfe; }
-        .q-status-dot { width:10px; height:10px; border-radius:999px; margin-top:6px; flex:0 0 auto; }
+        .q-status.success { border-left-color:var(--q-success); }
+        .q-status.warning { border-left-color:var(--q-warning); }
+        .q-status.danger { border-left-color:var(--q-danger); }
+        .q-status.info { border-left-color:var(--q-info); }
+        .q-status-dot { width:8px; height:8px; border-radius:999px; margin-top:7px; flex:0 0 auto; }
         .q-status.success .q-status-dot { background:var(--q-success); }
         .q-status.warning .q-status-dot { background:var(--q-warning); }
         .q-status.danger .q-status-dot { background:var(--q-danger); }
         .q-status.info .q-status-dot { background:var(--q-info); }
-        .q-status strong { color:var(--q-text); }
-        .q-status small { color:var(--q-muted); }
+        .q-status strong { color:var(--q-text); font-weight:750; }
+        .q-status small { color:var(--q-muted); line-height:1.45; }
 
-        .q-section-head { margin: 8px 0 14px; }
-        .q-section-head h2 { margin-bottom: 3px; }
+        .q-section-head { margin: 10px 0 14px; }
+        .q-section-head h2 { margin-bottom: 3px; font-weight:760; }
         .q-section-head p { margin:0; }
 
         .q-empty {
-            background:white; border:1px dashed #cbd5e1; border-radius:18px;
-            padding:34px 26px; text-align:center; margin-top:14px;
+            background:var(--q-surface);
+            border:1px dashed #CEC9BA;
+            border-radius:15px;
+            padding:34px 26px;
+            text-align:center;
+            margin-top:14px;
         }
         .q-empty h3 { margin-bottom:6px; }
 
         div[data-testid="stMetric"] {
-            background:white; border:1px solid var(--q-border); border-radius:16px;
-            padding:14px 16px; box-shadow:0 4px 14px rgba(15,23,42,.025);
+            background:var(--q-surface);
+            border:1px solid var(--q-border);
+            border-radius:14px;
+            padding:14px 16px;
+            box-shadow:none;
         }
         div[data-testid="stMetricLabel"] { font-weight:700; color:var(--q-muted); }
+        div[data-testid="stMetricValue"] { color:var(--q-text); }
+
         div[data-testid="stDataFrame"] {
-            border: 1px solid var(--q-border); border-radius: 14px; overflow:hidden; background:white;
+            border: 1px solid var(--q-border);
+            border-radius: 12px;
+            overflow:hidden;
+            background:var(--q-surface);
         }
-        .stButton > button, .stDownloadButton > button {
-            border-radius: 11px; min-height: 42px; font-weight: 750;
+
+        .stButton > button,
+        .stDownloadButton > button {
+            border-radius: 9px;
+            min-height: 42px;
+            font-weight: 720;
+            box-shadow:none;
         }
+        .stButton > button[kind="primary"],
         .stDownloadButton > button[kind="primary"] {
-            background: var(--q-primary); border-color: var(--q-primary);
+            background: var(--q-primary);
+            border-color: var(--q-primary);
+            color: #171711;
         }
-        [data-testid="stFileUploaderDropzone"] { border-radius: 14px; border-style:dashed; }
-        details { border-radius: 14px !important; }
+        .stButton > button[kind="primary"]:hover,
+        .stDownloadButton > button[kind="primary"]:hover {
+            background: #99925F;
+            border-color: #99925F;
+            color: #11110E;
+        }
+        .stButton > button[kind="secondary"],
+        .stDownloadButton > button[kind="secondary"] {
+            background: #FFFFFF;
+            color: var(--q-text);
+            border-color: #D7D3C8;
+        }
+
+        [data-testid="stFileUploaderDropzone"] {
+            border-radius: 12px;
+            border-style:dashed;
+            border-color:#CFCAB9;
+            background:#FBFAF7;
+        }
+        details {
+            border-radius: 12px !important;
+            border-color: var(--q-border) !important;
+            background: var(--q-surface) !important;
+        }
+
+        /* Radio de navegación: selección discreta, alineada al dorado Quartz. */
+        [data-testid="stSidebar"] div[role="radiogroup"] label {
+            border-radius: 9px;
+            padding: 3px 5px;
+        }
+        [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+            background: #E7E3D2;
+        }
 
         @media (max-width: 900px) {
             .block-container { padding-left: 1rem; padding-right: 1rem; }
-            .q-hero { padding: 22px 20px; }
-            .q-card-value { font-size:1.45rem; }
+            .q-hero { padding: 22px 20px 21px; }
+            .q-card-value { font-size:1.43rem; }
         }
         </style>
         """,
@@ -1812,7 +1919,15 @@ def main():
     # SIDEBAR: carga primero; navegación y filtros aparecen después.
     # ------------------------------------------------------------------
     with st.sidebar:
-        st.markdown("### Quartz · Auditoría ARPON")
+        st.markdown(
+            """
+            <div style="padding:4px 0 2px;">
+              <div style="font-size:1.18rem;font-weight:780;letter-spacing:-.025em;color:#1B1B19;">Quartz</div>
+              <div style="font-size:.76rem;font-weight:700;letter-spacing:.085em;text-transform:uppercase;color:#6F6A43;margin-top:2px;">Auditoría ARPON</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.caption(f"Motor {APP_VERSION}")
         st.divider()
         uploaded_files = st.file_uploader(
