@@ -16,7 +16,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-APP_VERSION = "5.0 ARPON · HOTEL QUARTZ · CLIENTES + PROVEEDORES"
+APP_VERSION = "5.1 ARPON · HOTEL QUARTZ · CLIENTES + PROVEEDORES"
 # Tolerancia contable en moneda. Se usa para validaciones y conciliaciones.
 # Dos centavos evitan falsos errores binarios de float sin aceptar diferencias materiales.
 UMBRAL_TOLERANCIA = 0.02
@@ -1593,279 +1593,331 @@ def aplicar_filtros_tabla(
 # ==============================================================================
 # 5. UI
 # ==============================================================================
+# ==============================================================================
+# 5. UI / UX
+# ==============================================================================
+
+
+def _inyectar_estilos_ui():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --q-bg: #f5f7fb;
+            --q-surface: #ffffff;
+            --q-text: #0f172a;
+            --q-muted: #64748b;
+            --q-border: #e2e8f0;
+            --q-primary: #0f766e;
+            --q-primary-soft: #ecfdf5;
+            --q-success: #15803d;
+            --q-success-soft: #f0fdf4;
+            --q-warning: #b45309;
+            --q-warning-soft: #fffbeb;
+            --q-danger: #b91c1c;
+            --q-danger-soft: #fef2f2;
+            --q-info: #1d4ed8;
+            --q-info-soft: #eff6ff;
+        }
+
+        .stApp { background: var(--q-bg); }
+        [data-testid="stHeader"] { background: rgba(245,247,251,.92); }
+        [data-testid="stSidebar"] { background: #0b1220; }
+        [data-testid="stSidebar"] * { color: #e5e7eb; }
+        [data-testid="stSidebar"] label { color: #dbe4ee !important; }
+        [data-testid="stSidebar"] .stCaptionContainer p { color: #94a3b8 !important; }
+        [data-testid="stSidebar"] [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] input { background: #111827; border-color: #334155; }
+
+        .block-container {
+            max-width: 1500px;
+            padding-top: 1.6rem;
+            padding-bottom: 3rem;
+        }
+
+        h1, h2, h3 { color: var(--q-text); letter-spacing: -.02em; }
+        p, .stCaptionContainer { color: var(--q-muted); }
+
+        .q-eyebrow {
+            display: inline-flex; align-items: center; gap: 7px;
+            font-size: .73rem; font-weight: 800; letter-spacing: .08em;
+            text-transform: uppercase; color: var(--q-primary);
+            background: var(--q-primary-soft); border: 1px solid #a7f3d0;
+            border-radius: 999px; padding: 6px 10px; margin-bottom: 12px;
+        }
+        .q-hero {
+            background: linear-gradient(135deg, #0f172a 0%, #111827 58%, #134e4a 150%);
+            border: 1px solid rgba(255,255,255,.08); border-radius: 22px;
+            padding: 26px 28px; margin-bottom: 18px; color: white;
+            box-shadow: 0 12px 36px rgba(15,23,42,.10);
+        }
+        .q-hero h1 { color: white; margin: 0 0 6px; font-size: clamp(1.65rem, 3vw, 2.25rem); }
+        .q-hero p { color: #cbd5e1; margin: 0; max-width: 900px; }
+        .q-hero-meta { margin-top: 16px; display:flex; gap:10px; flex-wrap:wrap; }
+        .q-pill {
+            display:inline-flex; align-items:center; border-radius:999px;
+            padding:6px 10px; font-size:.78rem; font-weight:700;
+            color:#d1fae5; background:rgba(16,185,129,.11); border:1px solid rgba(52,211,153,.24);
+        }
+
+        .q-card {
+            background: var(--q-surface); border: 1px solid var(--q-border);
+            border-radius: 18px; padding: 18px 19px; height: 100%;
+            box-shadow: 0 4px 16px rgba(15,23,42,.035);
+        }
+        .q-card-label { font-size:.75rem; color:var(--q-muted); font-weight:800; text-transform:uppercase; letter-spacing:.055em; }
+        .q-card-value { color:var(--q-text); font-size:1.7rem; line-height:1.12; font-weight:800; margin-top:7px; letter-spacing:-.03em; }
+        .q-card-note { color:var(--q-muted); font-size:.8rem; margin-top:7px; }
+
+        .q-status {
+            border-radius: 16px; padding: 15px 17px; margin: 4px 0 16px;
+            border: 1px solid var(--q-border); background: white;
+            display:flex; align-items:flex-start; gap:12px;
+        }
+        .q-status.success { background:var(--q-success-soft); border-color:#bbf7d0; }
+        .q-status.warning { background:var(--q-warning-soft); border-color:#fde68a; }
+        .q-status.danger { background:var(--q-danger-soft); border-color:#fecaca; }
+        .q-status.info { background:var(--q-info-soft); border-color:#bfdbfe; }
+        .q-status-dot { width:10px; height:10px; border-radius:999px; margin-top:6px; flex:0 0 auto; }
+        .q-status.success .q-status-dot { background:var(--q-success); }
+        .q-status.warning .q-status-dot { background:var(--q-warning); }
+        .q-status.danger .q-status-dot { background:var(--q-danger); }
+        .q-status.info .q-status-dot { background:var(--q-info); }
+        .q-status strong { color:var(--q-text); }
+        .q-status small { color:var(--q-muted); }
+
+        .q-section-head { margin: 8px 0 14px; }
+        .q-section-head h2 { margin-bottom: 3px; }
+        .q-section-head p { margin:0; }
+
+        .q-empty {
+            background:white; border:1px dashed #cbd5e1; border-radius:18px;
+            padding:34px 26px; text-align:center; margin-top:14px;
+        }
+        .q-empty h3 { margin-bottom:6px; }
+
+        div[data-testid="stMetric"] {
+            background:white; border:1px solid var(--q-border); border-radius:16px;
+            padding:14px 16px; box-shadow:0 4px 14px rgba(15,23,42,.025);
+        }
+        div[data-testid="stMetricLabel"] { font-weight:700; color:var(--q-muted); }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--q-border); border-radius: 14px; overflow:hidden; background:white;
+        }
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 11px; min-height: 42px; font-weight: 750;
+        }
+        .stDownloadButton > button[kind="primary"] {
+            background: var(--q-primary); border-color: var(--q-primary);
+        }
+        [data-testid="stFileUploaderDropzone"] { border-radius: 14px; border-style:dashed; }
+        details { border-radius: 14px !important; }
+
+        @media (max-width: 900px) {
+            .block-container { padding-left: 1rem; padding-right: 1rem; }
+            .q-hero { padding: 22px 20px; }
+            .q-card-value { font-size:1.45rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _money(valor):
+    try:
+        return f"${float(valor):,.2f}"
+    except Exception:
+        return "$0.00"
+
+
+def _kpi_card(label, value, note=""):
+    st.markdown(
+        f"""
+        <div class="q-card">
+          <div class="q-card-label">{label}</div>
+          <div class="q-card-value">{value}</div>
+          <div class="q-card-note">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _status_box(kind, title, detail):
+    st.markdown(
+        f"""
+        <div class="q-status {kind}">
+          <span class="q-status-dot"></span>
+          <div><strong>{title}</strong><br><small>{detail}</small></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _section(title, subtitle=""):
+    st.markdown(
+        f"""<div class="q-section-head"><h2>{title}</h2><p>{subtitle}</p></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_landing():
+    st.markdown(
+        """
+        <div class="q-hero">
+          <div class="q-eyebrow">Auditoría contable · ARPON</div>
+          <h1>Clientes y Proveedores · Hotel Quartz</h1>
+          <p>Valida auxiliares, reconstruye partidas ARPON fragmentadas, concilia documentos y entrega trazabilidad sin modificar los movimientos fuente.</p>
+          <div class="q-hero-meta">
+            <span class="q-pill">Clientes / CxC</span>
+            <span class="q-pill">Proveedores / CxP</span>
+            <span class="q-pill">Excel · CSV · XLSM</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _section("Comienza con los auxiliares ARPON", "Carga uno o varios archivos desde el panel izquierdo. El motor valida el archivo completo antes de mostrar resultados.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _kpi_card("01 · Carga", "Auxiliares", "Acepta Excel, XLSM, XLS y CSV exportados desde ARPON.")
+    with c2:
+        _kpi_card("02 · Valida", "Movimiento a movimiento", "Comprueba estructura, totales, secuencia de saldo y partidas fragmentadas.")
+    with c3:
+        _kpi_card("03 · Entrega", "Resultado auditable", "Hallazgos, documentos abiertos, conciliación y auxiliares marcados.")
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    _status_box("info", "La fuente no se altera", "Las reconstrucciones y conciliaciones se registran como trazabilidad. Póliza, documento, concepto, cargos, abonos y saldo originales permanecen preservados en los archivos de salida.")
+
+
+def _aplicar_tipo(df, tipos):
+    if df is None:
+        return pd.DataFrame()
+    if "tipo_cuenta" in df.columns and tipos is not None:
+        return df[df["tipo_cuenta"].isin(tipos)].copy()
+    return df
+
 
 def main():
     st.set_page_config(
-        page_title="Auditoría ARPON · Clientes y Proveedores · Hotel Quartz",
+        page_title="Auditoría ARPON · Hotel Quartz",
         layout="wide",
-        page_icon="🛡️",
+        page_icon="Q",
+        initial_sidebar_state="expanded",
     )
+    _inyectar_estilos_ui()
 
-    st.title("🛡️ Auditoría ARPON · Clientes y Proveedores · Hotel Quartz")
-    st.caption(f"Motor v{APP_VERSION}")
-
-    st.markdown(
-        """
-        Motor exclusivo para auxiliares **ARPON de Clientes y Proveedores de Hotel Quartz**.
-
-        - valida la estructura **Póliza | Fecha | Docto. | Concepto | Cargo | Abono | Saldo**;
-        - identifica empresa, periodo, cuenta y saldo inicial desde el propio reporte;
-        - valida **cargos, abonos y saldo acumulado movimiento por movimiento**;
-        - identifica **Clientes / Proveedores** y normaliza el saldo pendiente sin alterar la ecuación ARPON;
-        - conserva y normaliza **folios, documentos numéricos y documentos alfanuméricos** sin destruir identificadores;
-        - puede recuperar un folio desde **Concepto** cuando Docto. está vacío;
-        - identifica movimientos sin referencia, reversos y posibles duplicados;
-        - los cruces se realizan únicamente dentro de la **misma empresa ARPON**;
-        - reconstruye de forma controlada partidas ARPON fragmentadas y deja trazabilidad;
-        - genera una copia del auxiliar con **color y código de conciliación/auditoría**.
-        """
-    )
-
-    uploaded_files = st.file_uploader(
-        "📂 Sube auxiliares ARPON de Clientes y/o Proveedores (Excel o CSV)",
-        type=["xlsx", "xls", "xlsm", "csv"],
-        accept_multiple_files=True,
-    )
+    # ------------------------------------------------------------------
+    # SIDEBAR: carga primero; navegación y filtros aparecen después.
+    # ------------------------------------------------------------------
+    with st.sidebar:
+        st.markdown("### Quartz · Auditoría ARPON")
+        st.caption(f"Motor {APP_VERSION}")
+        st.divider()
+        uploaded_files = st.file_uploader(
+            "Auxiliares ARPON",
+            type=["xlsx", "xls", "xlsm", "csv"],
+            accept_multiple_files=True,
+            help="Carga Clientes, Proveedores o ambos. Puedes seleccionar varios periodos siempre que no se traslapren.",
+        )
 
     if not uploaded_files:
-        st.info("Esperando archivo(s)...")
+        _render_landing()
         return
 
-    movs_lista = []
-    resumen_lista = []
-    diags = []
-    errores = []
-
-    with st.spinner("Procesando y validando auxiliares..."):
+    movs_lista, resumen_lista, diags, errores = [], [], [], []
+    with st.spinner("Validando auxiliares ARPON…"):
         for uf in uploaded_files:
             try:
-                movs_i, resumen_i, diag_i = procesar_archivo_engine(
-                    uf.getvalue(), uf.name
-                )
+                movs_i, resumen_i, diag_i = procesar_archivo_engine(uf.getvalue(), uf.name)
                 movs_lista.append(movs_i)
                 resumen_lista.append(resumen_i)
                 diags.append(diag_i)
             except Exception as e:
-                errores.append(f"**{uf.name}:** {e}")
+                errores.append(f"{uf.name}: {e}")
 
     if errores:
-        st.error(
-            "⚠️ **No se certifica la lectura. Corrige o revisa estos archivos antes "
-            "de usar resultados:**\n\n"
-            + "\n\n".join(f"- {x}" for x in errores)
+        st.markdown(
+            """<div class="q-hero"><div class="q-eyebrow">Carga detenida</div><h1>No se certificó la lectura</h1><p>Uno o más auxiliares no superaron las validaciones del motor. Ningún resultado parcial se considera válido.</p></div>""",
+            unsafe_allow_html=True,
         )
-        st.stop()
+        for error in errores:
+            _status_box("danger", "Archivo rechazado", error)
+        st.info("Corrige o vuelve a exportar únicamente los archivos señalados y carga nuevamente el conjunto.")
+        return
 
     movs = pd.concat(movs_lista, ignore_index=True)
     resumen = pd.concat(resumen_lista, ignore_index=True)
+    diag_df = pd.DataFrame(diags)
 
     solapamientos = detectar_solapamientos_periodos(resumen)
     if not solapamientos.empty:
-        st.error(
-            "⛔ Se detectaron periodos superpuestos para la misma cuenta. "
-            "Cargar periodos traslapados duplicaría movimientos y puede crear conciliaciones falsas. "
-            "Carga archivos sin días repetidos para esa cuenta."
+        st.markdown(
+            """<div class="q-hero"><div class="q-eyebrow">Carga detenida</div><h1>Periodos superpuestos</h1><p>La misma cuenta contiene días repetidos entre archivos. Continuar podría duplicar movimientos y crear conciliaciones falsas.</p></div>""",
+            unsafe_allow_html=True,
         )
+        _status_box("danger", "No es seguro continuar", "Carga periodos consecutivos sin fechas traslapadas para la misma cuenta.")
         st.dataframe(solapamientos, use_container_width=True, hide_index=True)
-        st.stop()
-
-    # Evitar que cargar dos veces la misma cuenta pase desapercibido.
-    repetidas = (
-        resumen.groupby(["empresa_uid", "meta_codigo"])["archivo"]
-        .nunique()
-        .loc[lambda s: s > 1]
-    )
-    if not repetidas.empty:
-        st.warning(
-            "ℹ️ Hay cuentas presentes en más de un archivo. Los periodos no se solapan, "
-            "por lo que el motor los analizará como continuidad histórica: "
-            + ", ".join(str(x) for x in repetidas.index)
-        )
+        return
 
     resumen_nat = detectar_naturaleza(resumen, movs)
     movs = aplicar_naturaleza_a_movimientos(movs, resumen_nat)
     movs = marcar_duplicados_exactos(movs)
     df_cruces_ref = detectar_cruces_por_referencia(movs)
     df_evidencia = detectar_coincidencias_por_evidencia(movs)
-    movs = marcar_movimientos_conciliacion(
-        movs, df_cruces_ref, df_evidencia
-    )
+    movs = marcar_movimientos_conciliacion(movs, df_cruces_ref, df_evidencia)
     df_audit = analizar_saldos(movs, resumen_nat)
 
-    # --------------------------------------------------------------------------
-    # Validación visible de lectura
-    # --------------------------------------------------------------------------
-    st.divider()
-    st.subheader("✅ Validación de lectura")
+    fmax = movs["fecha"].max()
+    corte_default = fmax.date() if pd.notna(fmax) else pd.Timestamp.now().date()
 
-    diag_df = pd.DataFrame(diags)
-
-    st.caption("Sistema contable: ARPON")
-    empresas_arpon = sorted(
-        diag_df["empresa"].dropna().astype(str)
-        .loc[lambda x: x.str.strip().ne("")].unique()
-    )
-    if empresas_arpon:
-        st.caption("Empresa detectada: " + " | ".join(empresas_arpon))
-
+    # Totales generales antes de filtros.
     n_archivos = len(diag_df)
     n_cuentas = len(df_audit)
     n_movs = len(movs)
-
-    amarres_false = diag_df["amarre_gran_total"].eq(False).sum()
-    if amarres_false:
-        st.warning(
-            f"{amarres_false} archivo(s) no amarran la suma de saldos por cuenta "
-            "contra el saldo final reportado por ARPON. Revisa si el reporte contiene "
-            "agrupaciones adicionales."
-        )
-    else:
-        st.success(
-            f"Lectura estructural validada: **{n_archivos} archivo(s)** · "
-            f"**{n_cuentas} cuenta(s)** · **{n_movs:,} movimientos** · "
-            f"**{int(diag_df['n_filas_reconstruidas'].fillna(0).sum()):,} fila(s) reconstruida(s)**. "
-            "La estructura, los totales ARPON disponibles y las secuencias de saldo fueron validados."
-        )
-
-    for _, d in diag_df.iterrows():
-        gt_txt = (
-            f"${d['gran_total']:,.2f}"
-            if pd.notna(d.get("gran_total"))
-            else "no detectado"
-        )
-        amarre = d.get("amarre_gran_total")
-        if pd.isna(amarre):
-            estado_amarre = "ℹ️"
-        elif bool(amarre):
-            estado_amarre = "✅"
-        else:
-            estado_amarre = "⚠️"
-        st.caption(
-            f"{estado_amarre} {d['archivo']} · {'ARPON'} [{d.get('formato', 'N/D')}]: "
-            f"{int(d['n_headers'])} cuenta(s), {int(d['n_movs']):,} movimientos, "
-            f"Total {d.get('origen_gran_total', 'N/D')} {gt_txt} · reconstruidas {int(d.get('n_filas_reconstruidas', 0))}."
-        )
-
-    # --------------------------------------------------------------------------
-    # KPIs
-    # --------------------------------------------------------------------------
-    saldo_total = float(df_audit["saldo_final_pendiente"].sum())
-    saldo_clientes = float(
-        df_audit.loc[df_audit["tipo_cuenta"].eq("CLIENTES"), "saldo_final_pendiente"].sum()
-    )
-    saldo_proveedores = float(
-        df_audit.loc[df_audit["tipo_cuenta"].eq("PROVEEDORES"), "saldo_final_pendiente"].sum()
-    )
-    bruto_sin_ref = df_audit["importe_bruto_sin_referencia"].sum()
-    descuadre_abs = df_audit["descuadre_origen"].abs().sum()
-    n_sin_ref = int(df_audit["n_sin_referencia"].sum())
-    n_revisar = int((df_audit["estado"] != "🟢 OK").sum())
-
-    n_folios_conciliados = int(
-        movs[
-            movs["conciliacion_estado"].eq("CONCILIADO")
-            & movs["es_documento_conciliable"]
-        ][["cuenta_logica_uid", "referencia_norm"]].drop_duplicates().shape[0]
-    )
-    n_evidencias = (
-        int(df_evidencia["evidencia_id"].nunique())
-        if not df_evidencia.empty else 0
-    )
-    n_partidas_conciliadas = int(
-        movs["conciliacion_estado"].eq("CONCILIADO").sum()
-    )
-    n_partidas_revisar = int(
-        movs["conciliacion_estado"].eq("REVISAR").sum()
-    )
-
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Saldo pendiente normalizado", f"${saldo_total:,.2f}")
-    k2.metric(
-        "Movs sin referencia",
-        f"{n_sin_ref:,}",
-        help=f"Importe bruto involucrado: ${bruto_sin_ref:,.2f}",
-    )
-    k3.metric(
-        "Descuadre absoluto",
-        f"${descuadre_abs:,.2f}",
-        help="Suma de valores absolutos por cuenta; evita compensar + y -.",
-    )
-    k4.metric("Documentos conciliados", n_folios_conciliados)
-    k5.metric("Cruces por evidencia", n_evidencias)
-    k6.metric("Cuentas a revisar", n_revisar)
     n_reparaciones = int(movs["fila_reparada"].sum())
-    st.caption(
-        f"Pendiente normalizado · Clientes: ${saldo_clientes:,.2f} · "
-        f"Proveedores: ${saldo_proveedores:,.2f}. Marcas: "
-        f"{n_partidas_conciliadas:,} conciliada(s), {n_partidas_revisar:,} a revisar y "
-        f"{n_reparaciones:,} fila(s) ARPON reconstruida(s)."
+    saldo_clientes = float(df_audit.loc[df_audit["tipo_cuenta"].eq("CLIENTES"), "saldo_final_pendiente"].sum())
+    saldo_proveedores = float(df_audit.loc[df_audit["tipo_cuenta"].eq("PROVEEDORES"), "saldo_final_pendiente"].sum())
+    n_partidas_conciliadas = int(movs["conciliacion_estado"].eq("CONCILIADO").sum())
+    n_partidas_revisar = int(movs["conciliacion_estado"].eq("REVISAR").sum())
+    n_documentos_conciliados = int(
+        movs[movs["conciliacion_estado"].eq("CONCILIADO") & movs["es_documento_conciliable"]]
+        [["cuenta_logica_uid", "referencia_norm"]].drop_duplicates().shape[0]
     )
 
-    # Fecha de corte
-    fmax = movs["fecha"].max()
-    corte_default = (
-        fmax.date() if pd.notna(fmax) else pd.Timestamp.now().date()
-    )
-    corte = st.date_input(
-        "📅 Fecha de corte para antigüedad observada",
-        value=corte_default,
-        help=(
-            "La antigüedad se calcula desde la primera fecha observada del folio. "
-            "No equivale a días vencidos si no existe fecha de vencimiento."
-        ),
-    )
-    folios = analizar_folios(movs, corte)
+    # ------------------------------------------------------------------
+    # SIDEBAR: navegación y filtros.
+    # ------------------------------------------------------------------
+    with st.sidebar:
+        st.divider()
+        pagina = st.radio(
+            "Navegación",
+            ["Resumen", "Hallazgos", "Conciliación", "Documentos", "Movimientos", "Diagnóstico", "Exportar"],
+            index=0,
+        )
+        st.divider()
+        st.markdown("#### Filtros")
 
-    # --------------------------------------------------------------------------
-    # Filtros generales de tablas
-    # --------------------------------------------------------------------------
-    st.divider()
-    with st.expander("🎛️ Filtros de las tablas", expanded=True):
-        st.caption(
-            "Estos filtros se aplican a las tablas en todas las pestañas. Los "
-            "indicadores superiores y los archivos exportados conservan los "
-            "resultados completos."
-        )
-        fg1, fg2, fg3 = st.columns(3)
-        opciones_empresas = sorted(
-            movs["empresa"].fillna("").astype(str)
-            .loc[lambda s: s.str.strip().ne("")].unique()
-        )
-        opciones_archivos = sorted(
-            movs["archivo"].fillna("").astype(str).unique()
-        )
-        opciones_cuentas = sorted(
-            movs["meta_codigo"].fillna("").astype(str).unique()
-        )
-        empresas_filtro = fg1.multiselect(
-            "Empresa",
-            opciones_empresas,
-            default=opciones_empresas,
-            key="filtro_global_empresa",
-        )
-        archivos_filtro = fg2.multiselect(
-            "Archivo",
-            opciones_archivos,
-            default=opciones_archivos,
-            key="filtro_global_archivo",
-        )
-        cuentas_filtro = fg3.multiselect(
-            "Cuenta contable",
-            opciones_cuentas,
-            default=opciones_cuentas,
-            key="filtro_global_cuenta",
-        )
+        tipos_disponibles = sorted(movs["tipo_cuenta"].dropna().astype(str).unique())
+        tipos_filtro = st.multiselect("Tipo de cuenta", tipos_disponibles, default=tipos_disponibles)
 
-        fg4, fg5 = st.columns([1, 2])
-        fecha_min = movs["fecha"].min()
-        fecha_max = movs["fecha"].max()
+        opciones_empresas = sorted(movs["empresa"].fillna("").astype(str).loc[lambda s: s.str.strip().ne("")].unique())
+        empresas_filtro = st.multiselect("Empresa", opciones_empresas, default=opciones_empresas) if opciones_empresas else None
+
+        opciones_cuentas = sorted(movs["meta_codigo"].fillna("").astype(str).unique())
+        cuentas_filtro = st.multiselect("Cuenta", opciones_cuentas, default=opciones_cuentas)
+
+        opciones_archivos = sorted(movs["archivo"].fillna("").astype(str).unique())
+        archivos_filtro = st.multiselect("Archivo", opciones_archivos, default=opciones_archivos)
+
+        fecha_min, fecha_max = movs["fecha"].min(), movs["fecha"].max()
         if pd.notna(fecha_min) and pd.notna(fecha_max):
-            rango_fechas = fg4.date_input(
+            rango_fechas = st.date_input(
                 "Fecha del movimiento",
                 value=(fecha_min.date(), fecha_max.date()),
                 min_value=fecha_min.date(),
                 max_value=fecha_max.date(),
-                key="filtro_global_fecha",
             )
             if isinstance(rango_fechas, (tuple, list)) and len(rango_fechas) == 2:
                 fecha_desde_filtro, fecha_hasta_filtro = rango_fechas
@@ -1873,17 +1925,19 @@ def main():
                 fecha_desde_filtro = rango_fechas
                 fecha_hasta_filtro = rango_fechas
         else:
-            fecha_desde_filtro = None
-            fecha_hasta_filtro = None
+            fecha_desde_filtro = fecha_hasta_filtro = None
 
-        busqueda_filtro = fg5.text_input(
-            "Buscar en las tablas",
-            placeholder=(
-                "Folio, póliza, concepto, cuenta, archivo, estado o código..."
-            ),
-            key="filtro_global_busqueda",
-        )
+        busqueda_filtro = st.text_input("Buscar", placeholder="Documento, póliza, concepto…")
+        corte = st.date_input("Fecha de corte de antigüedad", value=corte_default)
 
+        with st.expander("Acerca del motor"):
+            st.caption(
+                "Valida la ecuación fuente de ARPON, identifica Clientes/Proveedores, "
+                "normaliza el pendiente, reconstruye partidas fragmentadas de forma controlada "
+                "y conserva trazabilidad de conciliaciones y reparaciones."
+            )
+
+    folios = analizar_folios(movs, corte)
     filtros_tabla = {
         "empresas": empresas_filtro if opciones_empresas else None,
         "archivos": archivos_filtro,
@@ -1892,609 +1946,310 @@ def main():
         "fecha_hasta": fecha_hasta_filtro,
         "busqueda": busqueda_filtro,
     }
-    movs_vista = aplicar_filtros_tabla(movs, **filtros_tabla)
-    audit_vista = aplicar_filtros_tabla(df_audit, **filtros_tabla)
-    folios_vista = aplicar_filtros_tabla(folios, **filtros_tabla)
-    cruces_ref_vista = aplicar_filtros_tabla(
-        df_cruces_ref, **filtros_tabla
-    )
-    evidencia_vista = aplicar_filtros_tabla(
-        df_evidencia, **filtros_tabla
-    )
+    movs_vista = _aplicar_tipo(aplicar_filtros_tabla(movs, **filtros_tabla), tipos_filtro)
+    audit_vista = _aplicar_tipo(aplicar_filtros_tabla(df_audit, **filtros_tabla), tipos_filtro)
+    folios_vista = _aplicar_tipo(aplicar_filtros_tabla(folios, **filtros_tabla), tipos_filtro)
+    cruces_ref_vista = _aplicar_tipo(aplicar_filtros_tabla(df_cruces_ref, **filtros_tabla), tipos_filtro)
+    evidencia_vista = _aplicar_tipo(aplicar_filtros_tabla(df_evidencia, **filtros_tabla), tipos_filtro)
     diag_vista = aplicar_filtros_tabla(diag_df, **filtros_tabla)
-    st.caption(
-        f"Resultado de filtros: {len(movs_vista):,} de {len(movs):,} "
-        f"movimiento(s) · {len(audit_vista):,} de {len(df_audit):,} cuenta(s)."
+
+    # Hallazgos filtrados, usados en varias pantallas.
+    sin_ref_movs = movs_vista[~movs_vista["tiene_referencia"]].copy()
+    refs_rec = movs_vista[movs_vista["referencia_recuperada"]].copy()
+    negativos = movs_vista[(movs_vista["cargos"] < 0) | (movs_vista["abonos"] < 0)].copy()
+    duplicados = movs_vista[movs_vista["posible_duplicado_exacto"]].copy()
+    reparadas = movs_vista[movs_vista["fila_reparada"]].copy()
+    descuadres = audit_vista[audit_vista["descuadre_origen"].abs() > UMBRAL_TOLERANCIA].copy()
+    contrarios = folios_vista[folios_vista["tipo_saldo"].str.contains("contrario", case=False, na=False)].copy()
+    viejos = folios_vista[folios_vista["antiguedad_observada"].eq("90+")].copy()
+    n_hallazgos_accion = len(descuadres) + len(sin_ref_movs) + len(duplicados) + len(contrarios)
+
+    # ------------------------------------------------------------------
+    # HEADER global.
+    # ------------------------------------------------------------------
+    st.markdown(
+        f"""
+        <div class="q-hero">
+          <div class="q-eyebrow">ARPON · Hotel Quartz</div>
+          <h1>{pagina}</h1>
+          <p>{n_archivos} archivo(s) · {n_cuentas} cuenta(s) · {n_movs:,} movimientos procesados · {n_reparaciones} reconstrucción(es) controlada(s)</p>
+          <div class="q-hero-meta">
+            <span class="q-pill">Lectura certificada</span>
+            <span class="q-pill">Clientes + Proveedores</span>
+            <span class="q-pill">Filtros: {len(movs_vista):,} movimientos visibles</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # --------------------------------------------------------------------------
-    # Pestañas
-    # --------------------------------------------------------------------------
-    tabs = st.tabs(
-        [
-            "🔎 Hallazgos",
-            "🚦 Semáforo",
-            "📑 Documentos",
-            "✅ Conciliación marcada",
-            "🏷️ Referencias",
-            "📉 Gráficos",
-            "🧪 Diagnóstico",
-        ]
-    )
+    # ------------------------------------------------------------------
+    # RESUMEN
+    # ------------------------------------------------------------------
+    if pagina == "Resumen":
+        amarres_false = int(diag_df["amarre_gran_total"].eq(False).sum())
+        if amarres_false == 0:
+            _status_box("success", "Carga validada", "Estructura, totales disponibles y secuencias de saldo superaron las validaciones. Puedes trabajar con los resultados.")
+        else:
+            _status_box("warning", "Carga con observaciones", f"{amarres_false} archivo(s) no tienen un amarre independiente de gran total. Revisa Diagnóstico antes de cerrar la auditoría.")
 
-    # --------------------------------------------------------------------------
-    # Hallazgos
-    # --------------------------------------------------------------------------
-    with tabs[0]:
-        st.subheader("🔎 Hallazgos priorizados")
-        st.caption(
-            "Los hallazgos son independientes. Una cuenta puede tener más de uno."
-        )
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            _kpi_card("Clientes · pendiente de cobro", _money(saldo_clientes), "Saldo pendiente normalizado")
+        with c2:
+            _kpi_card("Proveedores · pendiente de pago", _money(saldo_proveedores), "Saldo pendiente normalizado")
+        with c3:
+            _kpi_card("Documentos conciliados", f"{n_documentos_conciliados:,}", f"{n_partidas_conciliadas:,} partidas marcadas")
+        with c4:
+            _kpi_card("Requieren atención", f"{n_hallazgos_accion:,}", "Descuadres, sin referencia, duplicados o saldos contrarios")
 
-        sin_ref_movs = movs_vista[~movs_vista["tiene_referencia"]].copy()
-        refs_rec = movs_vista[movs_vista["referencia_recuperada"]].copy()
-        negativos = movs_vista[
-            (movs_vista["cargos"] < 0) | (movs_vista["abonos"] < 0)
-        ].copy()
-        duplicados = movs_vista[
-            movs_vista["posible_duplicado_exacto"]
-        ].copy()
-        descuadres = audit_vista[
-            audit_vista["descuadre_origen"].abs() > UMBRAL_TOLERANCIA
-        ].copy()
-        contrarios = folios_vista[
-            folios_vista["tipo_saldo"].str.contains(
-                "contrario", case=False, na=False
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        left, right = st.columns([1.18, .82])
+        with left:
+            _section("Antigüedad de documentos abiertos", "Saldo positivo pendiente, calculado desde la primera fecha observada del documento.")
+            orden = ["0-30", "31-60", "61-90", "90+"]
+            positivos = folios_vista[folios_vista["saldo_natural"] > 0].copy()
+            aging = (
+                positivos.groupby("antiguedad_observada")["saldo_natural"]
+                .agg(num_documentos="count", saldo="sum")
+                .reindex(orden).fillna(0).reset_index()
             )
-        ].copy()
-        viejos = folios_vista[
-            folios_vista["antiguedad_observada"].eq("90+")
-        ].copy()
+            fig = go.Figure()
+            fig.add_bar(x=aging["antiguedad_observada"], y=aging["saldo"], text=[_money(x) for x in aging["saldo"]], textposition="outside")
+            fig.update_layout(
+                height=330, margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title=None, yaxis_title=None, showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(gridcolor="#e2e8f0", tickprefix="$", separatethousands=True),
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        with right:
+            _section("Atención inmediata", "Los elementos que pueden requerir intervención contable.")
+            if len(descuadres):
+                _status_box("danger", f"{len(descuadres)} cuenta(s) con descuadre", "El saldo reconstruido no coincide con el saldo final ARPON dentro de tolerancia.")
+            if len(sin_ref_movs):
+                _status_box("warning", f"{len(sin_ref_movs)} movimiento(s) sin referencia", "No existe Docto. utilizable ni un documento recuperable desde Concepto.")
+            if len(duplicados):
+                _status_box("warning", f"{len(duplicados)} posible(s) duplicado(s)", "Coinciden cuenta, fecha, póliza, concepto, referencia y monto.")
+            if len(contrarios):
+                _status_box("warning", f"{len(contrarios)} documento(s) con saldo contrario", "El saldo neto del documento queda en dirección opuesta a la naturaleza esperada.")
+            if n_hallazgos_accion == 0:
+                _status_box("success", "Sin hallazgos críticos en los filtros actuales", "No se detectaron descuadres, movimientos sin referencia, duplicados exactos ni saldos contrarios.")
+            if len(reparadas):
+                _status_box("info", f"{len(reparadas)} partida(s) ARPON reconstruida(s)", "La reconstrucción fue validada posteriormente contra totales y secuencia completa de saldo.")
 
-        h1, h2, h3, h4, h5, h6 = st.columns(6)
-        h1.metric("Cuentas descuadre", len(descuadres))
-        h2.metric("Movs sin ref", len(sin_ref_movs))
-        h3.metric("Refs recuperadas", len(refs_rec))
-        h4.metric("Montos negativos", len(negativos))
-        h5.metric("Posibles duplicados", len(duplicados))
-        h6.metric("Documentos 90+ observados", len(viejos))
-
-        if len(descuadres):
-            st.markdown("#### 🟠 Descuadre contra el saldo final reportado por ARPON")
-            st.dataframe(
-                descuadres[
-                    [
-                        "sistema_origen", "empresa", "archivo", "meta_codigo",
-                        "meta_nombre", "naturaleza", "saldo_final_aux", "saldo_esperado_motor",
-                        "descuadre_origen"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if len(sin_ref_movs):
-            st.markdown("#### 🔴 Movimientos realmente sin referencia")
-            st.caption(
-                "No había referencia en la columna y tampoco fue posible recuperar "
-                "un folio documental inequívoco desde Concepto."
-            )
-            st.dataframe(
-                sin_ref_movs[
-                    [
-                        "archivo", "fila_origen", "fecha", "meta_codigo",
-                        "concepto", "cargos", "abonos", "efecto_natural"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if len(refs_rec):
-            st.markdown("#### 🟡 Referencias recuperadas desde Concepto")
-            st.caption(
-                "No se consideran 'sin referencia', pero se muestran para trazabilidad."
-            )
-            st.dataframe(
-                refs_rec[
-                    [
-                        "archivo", "fila_origen", "fecha", "meta_codigo",
-                        "concepto", "referencia_original", "referencia_norm",
-                        "cargos", "abonos"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        reparadas = movs_vista[movs_vista["fila_reparada"]].copy()
-        if len(reparadas):
-            st.markdown("#### 🔧 Filas ARPON reconstruidas")
-            st.caption(
-                "El archivo fuente partió una partida en dos filas. El motor reconstruyó "
-                "Concepto/Cargo/Abono/Saldo y posteriormente certificó el amarre completo."
-            )
-            st.dataframe(
-                reparadas[[
-                    "archivo", "fila_origen", "fila_continuacion", "fecha", "meta_codigo",
-                    "poliza", "referencia_original", "concepto", "cargos", "abonos", "saldo_acumulado"
-                ]],
-                use_container_width=True, hide_index=True,
-            )
-
-        if len(negativos):
-            st.markdown("#### 🟣 Montos negativos / reversos")
-            st.caption(
-                "Se señalan como movimiento especial; no se reinterpretan como abono."
-            )
-            st.dataframe(
-                negativos[
-                    [
-                        "archivo", "fila_origen", "fecha", "meta_codigo",
-                        "concepto", "referencia_norm", "cargos", "abonos",
-                        "efecto_natural"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if len(duplicados):
-            st.markdown("#### 🔁 Posibles duplicados exactos")
-            st.caption(
-                "Misma cuenta, fecha, tipo, póliza, concepto, referencia y monto. "
-                "Es un indicador para revisión, no una conclusión automática."
-            )
-            st.dataframe(
-                duplicados[
-                    [
-                        "archivo", "fila_origen", "fecha", "meta_codigo",
-                        "tipo_poliza", "poliza", "concepto",
-                        "referencia_norm", "cargos", "abonos"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if len(contrarios):
-            st.markdown("#### ⚠️ Documentos con saldo contrario a la naturaleza")
-            st.dataframe(
-                contrarios[
-                    [
-                        "archivo", "meta_codigo", "meta_nombre", "naturaleza",
-                        "referencia_norm", "primera_fecha", "dias",
-                        "cargos", "abonos", "saldo_natural", "tipo_saldo"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if not any(
-            [
-                len(descuadres), len(sin_ref_movs), len(refs_rec), len(reparadas),
-                len(negativos), len(duplicados), len(contrarios)
-            ]
-        ):
-            st.success("Sin hallazgos relevantes con los criterios actuales.")
-
-    # --------------------------------------------------------------------------
-    # Semáforo
-    # --------------------------------------------------------------------------
-    with tabs[1]:
-        st.subheader("🚦 Conciliación por cuenta")
-        solo_problemas = st.toggle(
-            "Ver solo cuentas con hallazgos",
-            value=False,
-            key="solo_problemas",
-        )
-        show = (
-            audit_vista[audit_vista["estado"] != "🟢 OK"]
-            if solo_problemas else audit_vista
-        )
-
-        cols = [
-            "sistema_origen", "empresa", "tipo_cuenta", "archivo", "meta_codigo",
-            "meta_nombre", "naturaleza", "naturaleza_confianza", "estado",
-            "saldo_inicial", "saldo_inicial_pendiente",
-            "total_cargos", "total_abonos", "saldo_final_aux", "saldo_final_pendiente",
-            "movs_con_referencia", "movs_sin_referencia",
-            "n_sin_referencia", "importe_bruto_sin_referencia",
-            "n_refs_recuperadas", "n_referencias_libres",
-            "n_montos_negativos", "descuadre_origen"
-        ]
+        _section("Cuentas procesadas", "Vista ejecutiva del saldo pendiente y estado por cuenta.")
+        resumen_cols = ["tipo_cuenta", "empresa", "meta_codigo", "meta_nombre", "estado", "saldo_final_pendiente", "n_sin_referencia", "n_montos_negativos", "descuadre_origen"]
+        resumen_cols = [c for c in resumen_cols if c in audit_vista.columns]
         st.dataframe(
-            show[cols],
-            use_container_width=True,
-            hide_index=True,
+            audit_vista[resumen_cols], use_container_width=True, hide_index=True,
             column_config={
-                "saldo_inicial": st.column_config.NumberColumn(
-                    "Saldo inicial", format="$%.2f"
-                ),
-                "saldo_inicial_pendiente": st.column_config.NumberColumn(
-                    "Saldo inicial pendiente", format="$%.2f"
-                ),
-                "total_cargos": st.column_config.NumberColumn(
-                    "Cargos", format="$%.2f"
-                ),
-                "total_abonos": st.column_config.NumberColumn(
-                    "Abonos", format="$%.2f"
-                ),
-                "saldo_final_aux": st.column_config.NumberColumn(
-                    "Saldo final ARPON", format="$%.2f"
-                ),
-                "saldo_final_pendiente": st.column_config.NumberColumn(
-                    "Saldo pendiente", format="$%.2f"
-                ),
-                "movs_con_referencia": st.column_config.NumberColumn(
-                    "Efecto con referencia", format="$%.2f"
-                ),
-                "movs_sin_referencia": st.column_config.NumberColumn(
-                    "Efecto sin referencia", format="$%.2f"
-                ),
-                "importe_bruto_sin_referencia": st.column_config.NumberColumn(
-                    "Bruto sin referencia", format="$%.2f"
-                ),
-                "descuadre_origen": st.column_config.NumberColumn(
-                    "Descuadre", format="$%.2f"
-                ),
+                "tipo_cuenta": st.column_config.TextColumn("Tipo"),
+                "meta_codigo": st.column_config.TextColumn("Cuenta"),
+                "meta_nombre": st.column_config.TextColumn("Nombre"),
+                "saldo_final_pendiente": st.column_config.NumberColumn("Saldo pendiente", format="$%.2f"),
+                "n_sin_referencia": st.column_config.NumberColumn("Sin referencia"),
+                "n_montos_negativos": st.column_config.NumberColumn("Reversos"),
+                "descuadre_origen": st.column_config.NumberColumn("Descuadre", format="$%.2f"),
             },
         )
 
-    # --------------------------------------------------------------------------
-    # Folios
-    # --------------------------------------------------------------------------
-    with tabs[2]:
-        st.subheader("📑 Documentos / folios abiertos")
-        st.caption(
-            "Incluye folios prefijados, numéricos y documentos alfanuméricos reconocibles. "
-            "La antigüedad es observada desde la primera fecha del folio, "
-            "no fecha contractual de vencimiento."
-        )
+    # ------------------------------------------------------------------
+    # HALLAZGOS
+    # ------------------------------------------------------------------
+    elif pagina == "Hallazgos":
+        _section("Revisión priorizada", "Selecciona una categoría. Evitamos mostrar siete tablas al mismo tiempo.")
+        categorias = {
+            "Descuadres": (len(descuadres), descuadres),
+            "Sin referencia": (len(sin_ref_movs), sin_ref_movs),
+            "Reconstrucciones ARPON": (len(reparadas), reparadas),
+            "Reversos / negativos": (len(negativos), negativos),
+            "Posibles duplicados": (len(duplicados), duplicados),
+            "Saldos contrarios": (len(contrarios), contrarios),
+            "Referencias recuperadas": (len(refs_rec), refs_rec),
+        }
+        cards = st.columns(4)
+        for i, (nombre, (cantidad, _)) in enumerate(categorias.items()):
+            with cards[i % 4]:
+                _kpi_card(nombre, f"{cantidad:,}", "Resultado con filtros actuales")
 
+        seleccion = st.selectbox("Ver detalle de", list(categorias.keys()))
+        cantidad, tabla = categorias[seleccion]
+        if cantidad == 0:
+            _status_box("success", f"Sin {seleccion.lower()}", "No hay registros en esta categoría con los filtros actuales.")
+        else:
+            if seleccion == "Descuadres":
+                cols = ["empresa", "archivo", "tipo_cuenta", "meta_codigo", "meta_nombre", "saldo_final_aux", "saldo_esperado_motor", "descuadre_origen"]
+            elif seleccion == "Sin referencia":
+                cols = ["archivo", "fila_origen", "fecha", "tipo_cuenta", "meta_codigo", "concepto", "cargos", "abonos", "efecto_natural"]
+            elif seleccion == "Reconstrucciones ARPON":
+                cols = ["archivo", "fila_origen", "fila_continuacion", "fecha", "meta_codigo", "poliza", "referencia_original", "concepto", "cargos", "abonos", "saldo_acumulado"]
+            elif seleccion == "Reversos / negativos":
+                cols = ["archivo", "fila_origen", "fecha", "meta_codigo", "concepto", "referencia_norm", "cargos", "abonos", "efecto_natural"]
+            elif seleccion == "Posibles duplicados":
+                cols = ["archivo", "fila_origen", "fecha", "meta_codigo", "tipo_poliza", "poliza", "concepto", "referencia_norm", "cargos", "abonos"]
+            elif seleccion == "Saldos contrarios":
+                cols = ["tipo_cuenta", "meta_codigo", "meta_nombre", "referencia_norm", "primera_fecha", "dias", "cargos", "abonos", "saldo_natural", "tipo_saldo"]
+            else:
+                cols = ["archivo", "fila_origen", "fecha", "meta_codigo", "concepto", "referencia_original", "referencia_norm", "cargos", "abonos"]
+            cols = [c for c in cols if c in tabla.columns]
+            st.dataframe(tabla[cols], use_container_width=True, hide_index=True, height=600)
+
+    # ------------------------------------------------------------------
+    # CONCILIACIÓN
+    # ------------------------------------------------------------------
+    elif pagina == "Conciliación":
+        _section("Conciliación de partidas", "Verde = grupo conciliado. Amarillo = relación detectada con remanente para revisión.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _kpi_card("Partidas conciliadas", f"{n_partidas_conciliadas:,}", "Marcadas por documento o evidencia")
+        with c2:
+            _kpi_card("Partidas a revisar", f"{n_partidas_revisar:,}", "Efectos relacionados con remanente")
+        with c3:
+            _kpi_card("Documentos conciliados", f"{n_documentos_conciliados:,}", "Documentos únicos con conciliación")
+
+        partidas = movs_vista[movs_vista["conciliacion_marcada"]].copy()
+        if partidas.empty:
+            _status_box("info", "Sin partidas marcadas", "No se detectaron relaciones de conciliación con los filtros actuales.")
+        else:
+            f1, f2 = st.columns(2)
+            estados = sorted(partidas["conciliacion_estado"].dropna().unique())
+            niveles = sorted(partidas["conciliacion_nivel"].dropna().loc[lambda s: s.astype(str).str.strip().ne("")].unique())
+            estados_sel = f1.multiselect("Estado", estados, default=estados)
+            niveles_sel = f2.multiselect("Nivel de evidencia", niveles, default=niveles)
+            p = partidas[partidas["conciliacion_estado"].isin(estados_sel) & partidas["conciliacion_nivel"].isin(niveles_sel)].copy()
+            cols = ["conciliacion_estado", "conciliacion_nivel", "conciliacion_criterio", "conciliacion_codigo", "tipo_cuenta", "archivo", "fila_origen", "fecha", "meta_codigo", "poliza", "referencia_original", "concepto", "cargos", "abonos", "efecto_natural"]
+            st.dataframe(p[cols], use_container_width=True, hide_index=True, height=600)
+
+        with st.expander("Cruces adicionales por mismo documento"):
+            if cruces_ref_vista.empty:
+                st.caption("Sin cruces entre cuentas para los filtros actuales.")
+            else:
+                st.dataframe(cruces_ref_vista, use_container_width=True, hide_index=True)
+        with st.expander("Coincidencias por evidencia (fecha + concepto + importe)"):
+            if evidencia_vista.empty:
+                st.caption("Sin coincidencias por evidencia para los filtros actuales.")
+            else:
+                st.dataframe(evidencia_vista, use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # DOCUMENTOS
+    # ------------------------------------------------------------------
+    elif pagina == "Documentos":
+        _section("Documentos abiertos", "Incluye folios numéricos, prefijados y documentos alfanuméricos reconocidos.")
         orden = ["0-30", "31-60", "61-90", "90+"]
         positivos = folios_vista[folios_vista["saldo_natural"] > 0].copy()
-        aging = (
-            positivos.groupby("antiguedad_observada")["saldo_natural"]
-            .agg(num_folios="count", saldo="sum")
-            .reindex(orden)
-            .fillna(0)
-            .reset_index()
-        )
-        st.dataframe(aging, use_container_width=True, hide_index=True)
+        aging = positivos.groupby("antiguedad_observada")["saldo_natural"].agg(num_documentos="count", saldo="sum").reindex(orden).fillna(0).reset_index()
+        c1, c2, c3, c4 = st.columns(4)
+        for col, bucket in zip([c1,c2,c3,c4], orden):
+            row = aging[aging["antiguedad_observada"].eq(bucket)].iloc[0]
+            with col:
+                _kpi_card(bucket + " días", _money(row["saldo"]), f"{int(row['num_documentos']):,} documento(s)")
 
-        if not folios_vista.empty:
-            nat_sel = st.multiselect(
-                "Naturaleza",
-                sorted(folios_vista["naturaleza"].dropna().unique()),
-                default=sorted(folios_vista["naturaleza"].dropna().unique()),
-            )
-            edades_sel = st.multiselect(
-                "Antigüedad observada",
-                orden,
-                default=orden,
-            )
-            fv = folios_vista[
-                folios_vista["naturaleza"].isin(nat_sel)
-                & folios_vista["antiguedad_observada"].isin(edades_sel)
-            ]
+        if folios_vista.empty:
+            _status_box("success", "Sin documentos abiertos", "No hay saldos documentales vivos con los filtros actuales.")
         else:
-            fv = folios_vista
+            d1, d2 = st.columns(2)
+            nat_opciones = sorted(folios_vista["naturaleza"].dropna().unique())
+            nat_sel = d1.multiselect("Naturaleza", nat_opciones, default=nat_opciones)
+            edades_sel = d2.multiselect("Antigüedad", orden, default=orden)
+            fv = folios_vista[folios_vista["naturaleza"].isin(nat_sel) & folios_vista["antiguedad_observada"].isin(edades_sel)].copy()
+            cols = ["tipo_cuenta", "empresa", "meta_codigo", "meta_nombre", "referencia_norm", "primera_fecha", "ultima_fecha", "dias", "antiguedad_observada", "cargos", "abonos", "saldo_natural", "tipo_saldo"]
+            cols = [c for c in cols if c in fv.columns]
+            st.dataframe(fv[cols], use_container_width=True, hide_index=True, height=650)
 
-        st.dataframe(
-            fv,
-            use_container_width=True,
-            hide_index=True,
-        )
+    # ------------------------------------------------------------------
+    # MOVIMIENTOS
+    # ------------------------------------------------------------------
+    elif pagina == "Movimientos":
+        _section("Movimientos ARPON", "Explorador de detalle. Los filtros del panel izquierdo aplican a esta tabla.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Movimientos visibles", f"{len(movs_vista):,}")
+        c2.metric("Con referencia", f"{int(movs_vista['tiene_referencia'].sum()):,}")
+        c3.metric("Sin referencia", f"{int((~movs_vista['tiene_referencia']).sum()):,}")
+        cols = ["archivo", "fila_origen", "fecha", "tipo_cuenta", "meta_codigo", "poliza", "referencia_original", "referencia_norm", "referencia_tipo", "concepto", "cargos", "abonos", "saldo_acumulado", "efecto_natural", "conciliacion_estado"]
+        cols = [c for c in cols if c in movs_vista.columns]
+        st.dataframe(movs_vista[cols], use_container_width=True, hide_index=True, height=680)
 
-    # --------------------------------------------------------------------------
-    # Cruces / conciliación
-    # --------------------------------------------------------------------------
-    with tabs[3]:
-        st.subheader("✅ Conciliación de partidas")
-        c1, c2 = st.columns(2)
-        c1.metric("Partidas conciliadas", f"{n_partidas_conciliadas:,}")
-        c2.metric("Coincidencias a revisar", f"{n_partidas_revisar:,}")
-        st.caption(
-            "En pantalla y en el auxiliar descargado, verde significa grupo con neto aproximado "
-            "a cero; amarillo significa efectos opuestos con remanente y requiere "
-            "revisión."
-        )
+    # ------------------------------------------------------------------
+    # DIAGNÓSTICO
+    # ------------------------------------------------------------------
+    elif pagina == "Diagnóstico":
+        _section("Diagnóstico técnico", "Trazabilidad de lectura y validaciones. Esta sección está pensada para revisión técnica, no para operación diaria.")
+        with st.expander("Archivos y validación de origen", expanded=True):
+            st.dataframe(diag_vista, use_container_width=True, hide_index=True)
 
-        st.markdown("#### Partidas marcadas")
-        st.caption(
-            "Estas son exactamente las filas que recibirán color y código en el "
-            "auxiliar descargado."
-        )
-        partidas_base = movs_vista[movs_vista["conciliacion_marcada"]].copy()
-        pc1, pc2 = st.columns(2)
-        estados_disponibles = sorted(
-            partidas_base["conciliacion_estado"].dropna().unique()
-        )
-        niveles_disponibles = sorted(
-            partidas_base["conciliacion_nivel"].dropna()
-            .loc[lambda s: s.astype(str).str.strip().ne("")].unique()
-        )
-        estados_conciliacion = pc1.multiselect(
-            "Estado de conciliación",
-            estados_disponibles,
-            default=estados_disponibles,
-            key="filtro_conciliacion_estado",
-        )
-        niveles_conciliacion = pc2.multiselect(
-            "Nivel de evidencia",
-            niveles_disponibles,
-            default=niveles_disponibles,
-            key="filtro_conciliacion_nivel",
-        )
-        partidas_pantalla = partidas_base[
-            partidas_base["conciliacion_estado"].isin(estados_conciliacion)
-            & partidas_base["conciliacion_nivel"].isin(niveles_conciliacion)
-        ].copy()
-        if partidas_pantalla.empty:
-            st.info(
-                "No hay partidas para marcar. Carga al mismo tiempo los auxiliares "
-                "de las cuentas que deseas conciliar."
+        with st.expander("Naturaleza y ecuación ARPON", expanded=False):
+            diag_cols = ["sistema_origen", "empresa", "tipo_cuenta", "archivo", "meta_codigo", "meta_nombre", "naturaleza", "naturaleza_confianza", "saldo_inicial", "total_cargos", "total_abonos", "esperado_arpon", "saldo_final_aux", "error_arpon", "saldo_final_pendiente", "ecuacion_saldo_fuente", "n_errores_saldo_secuencia", "max_error_saldo_secuencia", "error_ultimo_saldo_vs_total", "n_filas_reconstruidas"]
+            diag_cols = [c for c in diag_cols if c in audit_vista.columns]
+            st.dataframe(audit_vista[diag_cols], use_container_width=True, hide_index=True)
+
+        with st.expander("Reconstrucciones ARPON", expanded=bool(len(reparadas))):
+            if reparadas.empty:
+                st.caption("No hubo partidas fragmentadas que reconstruir.")
+            else:
+                cols = ["archivo", "fila_origen", "fila_continuacion", "fecha", "meta_codigo", "poliza", "referencia_original", "concepto", "cargos", "abonos", "saldo_acumulado"]
+                st.dataframe(reparadas[cols], use_container_width=True, hide_index=True)
+
+        _status_box("info", "Definiciones", "“Sin referencia” = Docto. vacío sin documento recuperable. “Antigüedad observada” no equivale a vencimiento contractual. “Posible duplicado” es un indicador para revisión, no una eliminación automática.")
+
+    # ------------------------------------------------------------------
+    # EXPORTAR
+    # ------------------------------------------------------------------
+    elif pagina == "Exportar":
+        _section("Exportación", "Dos salidas: expediente completo de auditoría y auxiliares ARPON marcados para trabajo operativo.")
+
+        ejecucion_rows = []
+        fecha_ejecucion = pd.Timestamp.now(tz="UTC").isoformat()
+        for uf in uploaded_files:
+            data_bytes = uf.getvalue()
+            ejecucion_rows.append({
+                "version_motor": APP_VERSION,
+                "fecha_ejecucion_utc": fecha_ejecucion,
+                "archivo": uf.name,
+                "sha256": hashlib.sha256(data_bytes).hexdigest(),
+                "bytes": len(data_bytes),
+                "tolerancia_contable": UMBRAL_TOLERANCIA,
+                "umbral_documento": UMBRAL_FOLIO,
+            })
+        ejecucion_df = pd.DataFrame(ejecucion_rows)
+        reparaciones_df = movs[movs["fila_reparada"]].copy()
+        export_tables = {
+            "Ejecucion": ejecucion_df,
+            "Semaforo": df_audit,
+            "Documentos": folios,
+            "Movimientos": movs,
+            "Reparaciones_ARPON": reparaciones_df,
+            "Cruces_documento": df_cruces_ref,
+            "Cruces_evidencia": df_evidencia,
+            "Diagnostico": diag_df,
+        }
+
+        e1, e2 = st.columns(2)
+        with e1:
+            _kpi_card("Expediente de auditoría", "Excel maestro", "Incluye ejecución, semáforo, documentos, movimientos, reparaciones, cruces y diagnóstico.")
+            st.download_button(
+                "Descargar auditoría completa",
+                data=to_excel_workbook(export_tables),
+                file_name="auditoria_master_saldos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary", use_container_width=True,
             )
-        else:
-            partidas_pantalla = partidas_pantalla[
-                [
-                    "conciliacion_estado", "conciliacion_nivel",
-                    "conciliacion_criterio", "conciliacion_codigo",
-                    "archivo", "fila_origen", "fecha", "meta_codigo",
-                    "poliza", "referencia_original", "concepto",
-                    "cargos", "abonos", "efecto_natural",
-                ]
-            ].sort_values(
-                ["conciliacion_estado", "archivo", "fila_origen"]
-            )
-            partidas_pantalla = partidas_pantalla.rename(
-                columns={
-                    "conciliacion_estado": "Estado",
-                    "conciliacion_nivel": "Nivel",
-                    "conciliacion_criterio": "Criterio",
-                    "conciliacion_codigo": "Código",
-                    "archivo": "Archivo",
-                    "fila_origen": "Fila ARPON",
-                    "fecha": "Fecha",
-                    "meta_codigo": "Cuenta",
-                    "poliza": "Póliza",
-                    "referencia_original": "Docto.",
-                    "concepto": "Concepto",
-                    "cargos": "Cargo",
-                    "abonos": "Abono",
-                    "efecto_natural": "Efecto natural",
-                }
-            )
-
-            def color_partida(row):
-                if row["Estado"] == "CONCILIADO":
-                    estilo = "background-color: #EAF4E3; color: #006100;"
-                else:
-                    estilo = "background-color: #FFF7D6; color: #9C6500;"
-                return [estilo] * len(row)
-
-            tabla_marcada = (
-                partidas_pantalla.style
-                .apply(color_partida, axis=1)
-                .format(
-                    {
-                        "Cargo": "${:,.2f}",
-                        "Abono": "${:,.2f}",
-                        "Efecto natural": "${:,.2f}",
-                    },
-                    na_rep="",
+        with e2:
+            _kpi_card("Auxiliares de trabajo", "ARPON marcado", "Conserva el origen y añade marcas de conciliación, revisión y reconstrucción.")
+            if n_partidas_conciliadas or n_partidas_revisar or n_reparaciones:
+                archivos_origen = [(uf.name, uf.getvalue()) for uf in uploaded_files]
+                data_marcada, nombre_marcado, mime_marcado = construir_descarga_auxiliares_marcados(archivos_origen, movs)
+                st.download_button(
+                    "Descargar auxiliar(es) marcado(s)",
+                    data=data_marcada, file_name=nombre_marcado, mime=mime_marcado,
+                    type="primary", use_container_width=True,
                 )
-            )
-            st.dataframe(
-                tabla_marcada,
-                use_container_width=True,
-                hide_index=True,
-                height=min(620, 85 + 35 * len(partidas_pantalla)),
-            )
+            else:
+                st.button("No hay marcas para exportar", disabled=True, use_container_width=True)
 
-        st.markdown("#### A. Cruces adicionales entre cuentas por el mismo documento")
-        if cruces_ref_vista.empty:
-            st.info(
-                "No se encontraron documentos idénticos con efectos opuestos "
-                "entre cuentas cargadas."
-            )
-        else:
-            st.dataframe(
-                cruces_ref_vista,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.markdown("#### B. Coincidencias fuertes aunque el documento sea diferente")
-        st.caption(
-            "Misma fecha + mismo concepto + mismo importe absoluto + "
-            "efecto pendiente opuesto entre cuentas del mismo tipo. Es evidencia para revisar/conciliar; "
-            "no se basa en similitud difusa de nombres."
-        )
-        if evidencia_vista.empty:
-            st.info(
-                "No se encontraron coincidencias fuertes entre las cuentas cargadas."
-            )
-        else:
-            st.success(
-                f"Se encontraron {evidencia_vista['evidencia_id'].nunique():,} "
-                "grupo(s) de evidencia."
-            )
-            st.dataframe(
-                evidencia_vista,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    # --------------------------------------------------------------------------
-    # Referencias
-    # --------------------------------------------------------------------------
-    with tabs[4]:
-        st.subheader("🏷️ Auditoría de referencias")
-        refs = tabla_referencias(movs_vista)
-
-        tipos = (
-            refs["referencia_tipo"].fillna("VACIA").value_counts()
-            .rename_axis("tipo")
-            .reset_index(name="movimientos")
-        )
-        st.dataframe(tipos, use_container_width=True, hide_index=True)
-
-        filtro_tipo = st.multiselect(
-            "Tipo de referencia",
-            sorted(refs["referencia_tipo"].dropna().unique()),
-            default=sorted(refs["referencia_tipo"].dropna().unique()),
-        )
-        refs_show = refs[refs["referencia_tipo"].isin(filtro_tipo)]
-        st.dataframe(
-            refs_show,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # --------------------------------------------------------------------------
-    # Gráficos
-    # --------------------------------------------------------------------------
-    with tabs[5]:
-        st.subheader("📉 Composición del saldo pendiente normalizado")
-
-        saldo_ini = audit_vista["saldo_inicial_pendiente"].sum()
-        con_ref = audit_vista["movs_con_referencia"].sum()
-        sin_ref = audit_vista["movs_sin_referencia"].sum()
-        desc = audit_vista["descuadre_origen"].sum()
-
-        fig = go.Figure(
-            data=[
-                go.Bar(
-                    name="Saldo inicial",
-                    x=["Saldo total"],
-                    y=[saldo_ini],
-                ),
-                go.Bar(
-                    name="Efecto con referencia",
-                    x=["Saldo total"],
-                    y=[con_ref],
-                ),
-                go.Bar(
-                    name="Efecto sin referencia",
-                    x=["Saldo total"],
-                    y=[sin_ref],
-                ),
-                go.Bar(
-                    name="Descuadre",
-                    x=["Saldo total"],
-                    y=[desc],
-                ),
-            ]
-        )
-        fig.update_layout(
-            barmode="relative",
-            title="Composición del saldo pendiente normalizado",
-            yaxis_title="Monto",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --------------------------------------------------------------------------
-    # Diagnóstico
-    # --------------------------------------------------------------------------
-    with tabs[6]:
-        st.subheader("🧪 Diagnóstico técnico")
-
-        st.markdown("#### Archivos")
-        st.dataframe(diag_vista, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Detección de naturaleza")
-        diag_cols = [
-            "sistema_origen", "empresa", "tipo_cuenta", "archivo", "meta_codigo",
-            "meta_nombre", "naturaleza", "naturaleza_confianza",
-            "saldo_inicial", "total_cargos", "total_abonos", "esperado_arpon",
-            "saldo_final_aux", "error_arpon", "saldo_final_pendiente",
-            "ecuacion_saldo_fuente", "n_errores_saldo_secuencia",
-            "max_error_saldo_secuencia", "error_ultimo_saldo_vs_total",
-            "n_filas_reconstruidas"
-        ]
-        diag_cols = [c for c in diag_cols if c in df_audit.columns]
-        st.dataframe(
-            audit_vista[diag_cols],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.markdown("#### Definiciones importantes")
-        st.info(
-            "• 'Sin referencia' significa Referencia/Docto. vacío y sin folio "
-            "recuperable del Concepto.\n\n"
-            "• 'Referencia libre' significa que sí existe texto en Referencia, "
-            "pero no tiene forma de folio documental.\n\n"
-            "• 'Antigüedad observada' no equivale a vencimiento.\n\n"
-            "• 'Posible duplicado exacto' es un indicador, no una eliminación automática."
-        )
-
-    # --------------------------------------------------------------------------
-    # Exportación completa
-    # --------------------------------------------------------------------------
-    st.divider()
-    st.subheader("⬇️ Exportación")
-
-    ejecucion_rows = []
-    fecha_ejecucion = pd.Timestamp.now(tz="UTC").isoformat()
-    for uf in uploaded_files:
-        data_bytes = uf.getvalue()
-        ejecucion_rows.append({
-            "version_motor": APP_VERSION,
-            "fecha_ejecucion_utc": fecha_ejecucion,
-            "archivo": uf.name,
-            "sha256": hashlib.sha256(data_bytes).hexdigest(),
-            "bytes": len(data_bytes),
-            "tolerancia_contable": UMBRAL_TOLERANCIA,
-            "umbral_documento": UMBRAL_FOLIO,
-        })
-    ejecucion_df = pd.DataFrame(ejecucion_rows)
-    reparaciones_df = movs[movs["fila_reparada"]].copy()
-
-    export_tables = {
-        "Ejecucion": ejecucion_df,
-        "Semaforo": df_audit,
-        "Documentos": folios,
-        "Movimientos": movs,
-        "Reparaciones_ARPON": reparaciones_df,
-        "Cruces_documento": df_cruces_ref,
-        "Cruces_evidencia": df_evidencia,
-        "Diagnostico": diag_df,
-    }
-    st.download_button(
-        "⬇️ Descargar auditoría completa (Excel)",
-        data=to_excel_workbook(export_tables),
-        file_name="auditoria_master_saldos.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-    )
-
-    if n_partidas_conciliadas or n_partidas_revisar or n_reparaciones:
-        archivos_origen = [
-            (uf.name, uf.getvalue()) for uf in uploaded_files
-        ]
-        data_marcada, nombre_marcado, mime_marcado = (
-            construir_descarga_auxiliares_marcados(archivos_origen, movs)
-        )
-        st.download_button(
-            "🎨 Descargar auxiliar(es) con conciliación marcada",
-            data=data_marcada,
-            file_name=nombre_marcado,
-            mime=mime_marcado,
-            help=(
-                "Agrega una columna de auditoría y colorea conciliaciones/reconstrucciones "
-                "sin modificar póliza, fecha, documento, concepto, cargos, abonos ni saldo del origen."
-            ),
-        )
-    else:
-        st.info(
-            "No hay partidas de conciliación ni filas reconstruidas para marcar con los archivos cargados."
-        )
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+        _status_box("success", "Expediente reproducible", "La hoja Ejecución registra versión del motor, fecha UTC, SHA-256, tamaño del archivo y tolerancias utilizadas.")
 
 
 if __name__ == "__main__":
